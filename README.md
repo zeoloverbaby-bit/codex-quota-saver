@@ -51,6 +51,9 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | `install.ps1` / `install.sh` | 一键安装 | 备份不删除、只追加不覆盖，见下节 |
 | `bridge/` | MCP 桥半自动部署（可选增强） | 网页 GPT 直连仓库免人工中转；`setup.ps1/.sh` 一条命令装完，用户只需创建连接器 + 输一次密码（生成的 `.local.*` 文件含密钥、已 gitignore） |
 | `docs/lean-execution.md` | AI 执行治理八原则（提炼版） | 治理低效也是额度浪费：连续执行 + STOP 稀缺 + Evidence 继承 + 验证成比例 |
+| `COMPATIBILITY.md` | 兼容性矩阵 + 版本 pin | 今天能跑 → clone 后也能跑 |
+| `SECURITY.md` | 安全边界与免责声明 | 部署前必读 |
+| `CHANGELOG.md` | 版本历史 | 判断要不要升级 |
 | `docs/pitfalls.md` | 15 个实测坑 | 部署与排障，人话版 |
 | `eval/` | A/B 评测方案 | 量化省了多少额度（协议 + 任务集 + 雷达图脚本） |
 
