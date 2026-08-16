@@ -127,11 +127,11 @@ if ($McpExe -eq "") {
   Write-Host "[1/6] 未找到 coding-tools-mcp，尝试 uv tool install..."
   $uv = Get-Command "uv" -ErrorAction SilentlyContinue
   if ($uv) {
-    & uv tool install coding-tools-mcp | Out-Null
+    & uv tool install "coding-tools-mcp==0.3.0" | Out-Null
     $McpExe = Find-Tool "coding-tools-mcp" (Join-Path $env:USERPROFILE ".local\bin\coding-tools-mcp.exe")
   }
   if ($McpExe -eq "") {
-    Write-Host "[stop] 装不上。请手动执行: uv tool install coding-tools-mcp （无 uv 则先装 uv: https://docs.astral.sh/uv/）" -ForegroundColor Red
+    Write-Host "[stop] 装不上。请手动执行: uv tool install `"coding-tools-mcp==0.3.0`" （版本 pin 见 COMPATIBILITY.md；无 uv 则先装 uv: https://docs.astral.sh/uv/）" -ForegroundColor Red
     exit 1
   }
 }
@@ -140,7 +140,7 @@ Write-Host "[1/6] coding-tools-mcp: $McpExe"
 $NgrokExe = Find-Ngrok
 if ($NgrokExe -eq "") {
   Write-Host "[2/6] 未找到 ngrok，尝试 winget install..."
-  winget install --id Ngrok.Ngrok -e --accept-package-agreements --accept-source-agreements 2>$null | Out-Null
+  winget install --id Ngrok.Ngrok -e --version 3.39.11 --accept-package-agreements --accept-source-agreements 2>$null | Out-Null
   $NgrokExe = Find-Ngrok
 }
 if ($NgrokExe -eq "") {

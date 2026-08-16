@@ -39,14 +39,14 @@ fi
 if ! command -v coding-tools-mcp >/dev/null 2>&1; then
   echo "[1/6] 未找到 coding-tools-mcp，尝试 uv tool install..."
   if command -v uv >/dev/null 2>&1; then
-    uv tool install coding-tools-mcp
+    uv tool install "coding-tools-mcp==0.3.0"
   fi
 fi
-command -v coding-tools-mcp >/dev/null 2>&1 || { echo "[stop] 装不上。请手动执行: uv tool install coding-tools-mcp"; exit 1; }
+command -v coding-tools-mcp >/dev/null 2>&1 || { echo "[stop] 装不上。请手动执行: uv tool install \"coding-tools-mcp==0.3.0\"（pin 见 COMPATIBILITY.md）"; exit 1; }
 echo "[1/6] coding-tools-mcp: $(command -v coding-tools-mcp)"
 
 if ! command -v ngrok >/dev/null 2>&1; then
-  echo "[stop] 未找到 ngrok。macOS: brew install ngrok；Linux: 到 ngrok.com 下载。装好后重跑本脚本。"
+  echo "[stop] 未找到 ngrok。macOS: brew install ngrok；Linux: 到 ngrok.com 下载（实测 pin: 3.39.11，见 COMPATIBILITY.md）。装好后重跑本脚本。"
   exit 1
 fi
 echo "[2/6] ngrok: $(command -v ngrok)"
