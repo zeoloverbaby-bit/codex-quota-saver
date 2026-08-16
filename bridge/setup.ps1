@@ -6,6 +6,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$Domain,
     [Parameter(Mandatory=$true)][string]$Workspace,
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword',
+        'OAuth 密码：crypto RNG 生成（或用户显式传入），仅落盘 ACL 收紧的本地 secrets 文件，不经进程命令行')]
     [string]$OAuthPassword,
     [switch]$DryRun
 )
