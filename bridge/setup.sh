@@ -17,8 +17,14 @@ ALLOWLIST='server_info read_file list_dir list_files search_text git_status git_
 
 new_token() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
-[ -n "$DOMAIN" ] && [ -n "$WORKSPACE" ] || { echo "用法: setup.sh <ngrok域名> <workspace> [--dry-run]"; exit 2; }
-[ -d "$WORKSPACE" ] || { echo "工作区不存在: $WORKSPACE"; exit 1; }
+if [ -z "$DOMAIN" ] || [ -z "$WORKSPACE" ]; then
+  echo "用法: setup.sh <ngrok域名> <workspace> [--dry-run]"
+  exit 2
+fi
+if [ ! -d "$WORKSPACE" ]; then
+  echo "工作区不存在: $WORKSPACE"
+  exit 1
+fi
 
 if [ "$MODE" = "--dry-run" ]; then
   echo "[dry-run] 将生成 $ENV_FILE / $GUARD_CONF / $LAUNCHER（token 随机）"
@@ -48,6 +54,7 @@ cat > "$GUARD_CONF" <<EOF
   "workspace": "$WORKSPACE",
   "upstream_url": "http://127.0.0.1:$UPSTREAM_PORT/mcp",
   "token_env": "CQS_GUARD_TOKEN", "upstream_token_env": "CQS_UPSTREAM_TOKEN",
+  # shellcheck disable=SC2086  # $ALLOWLIST 故意的分词（拆成 JSON 数组元素）
   "allowlist": [$(printf '"%s", ' $ALLOWLIST | sed 's/, $//')]
 }
 EOF

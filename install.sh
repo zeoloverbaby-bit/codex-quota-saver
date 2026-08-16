@@ -141,7 +141,10 @@ if [ "$MODE" = "--uninstall" ]; then do_uninstall; exit 0; fi
 if [ "$MODE" != "--dry-run" ] && [ "$MODE" != "install" ]; then
   echo "用法: install.sh <CODEX_HOME> <PROJECT_PATH> [--dry-run|--uninstall]"; exit 2
 fi
-[ -n "$PROJECT_PATH" ] && [ -d "$PROJECT_PATH" ] || { echo "项目路径不存在"; exit 1; }
+if [ -z "$PROJECT_PATH" ] || [ ! -d "$PROJECT_PATH" ]; then
+  echo "项目路径不存在"
+  exit 1
+fi
 
 # dry-run 不得落任何文件（目录也不建）；uninstall 已提前退出
 if [ "$MODE" = "install" ]; then
