@@ -42,9 +42,10 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | 路径 | 是什么 | 解决什么 |
 |---|---|---|
 | `global/config-agents.toml` | `[agents]` 段模板 | 子代理默认用 Luna Max、并发上限 6 |
-| `global/AGENTS.md` | 路由规则 + 协作协议 | 「默认不 spawn + 4 条件」纪律；执行层职责边界 |
+| `global/AGENTS.md` | 子代理路由硬规则（全局） | 「默认不 spawn + 4 条件」纪律 |
 | `global/agents/luna-worker.toml` | 子代理定义 | 有界执行包（文件互斥、7 类 STOP 条件、不宣称验收） |
 | `project/dot-codex/config.toml` | 项目级配置 | 该项目主线程 = Luna Max（按项目分层，其他项目不受影响） |
+| `project/AGENTS.md` | 三层协作协议（项目级模板） | 三层角色与执行层职责只进本项目，不污染其他仓库 |
 | `project/dot-codex/next-step.md` | 交接协议模板 | 网页 GPT → Codex 的零思考指令格式 |
 | `project/dot-codex/skills/luna-routing/SKILL.md` | 路由决策技能 | spawn 判定决策树 + 执行包模板 + 验证门槛 |
 | `project/web-gpt-project-prompt.md` | GPT 项目指令模板 | 分析层的行为规范（粘贴给网页 GPT，不装磁盘） |
@@ -129,8 +130,11 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 - **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西
 - `config.toml`：只追加 `[agents]` 段；已有 `[agents]` 则跳过
-- `AGENTS.md`：不存在则创建；已存在则**追加**两个小节（带「可整体删除回滚」标记），不覆盖你原有内容
+- `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容
+- 三层协作协议写入**项目根** `AGENTS.md`（项目级指令），不再追加到全局 `~/.codex/AGENTS.md`——其他仓库不受三层协议影响
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
+- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚；项目数据文件与 .bak 一律保留，不自动删除）
+- 每次安装落一份 manifest 到 `~/.codex/.codex-quota-saver-manifest.*`，重复安装幂等
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 
 ## 部署完成后，每天就 5 步
@@ -151,6 +155,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 - **Observed behavior · verified_at=2026-08-16**：App 档位白名单：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
 - **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-16）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
 - **Observed behavior · verified_at=2026-08-16**：改动 AGENTS.md / config 后必须开新会话才生效
+- **Observed behavior · verified_at=2026-08-16**：v1.5.0 及以前安装会把三层协议追加到全局 `~/.codex/AGENTS.md`。升级到 v1.6.0 后建议迁移：删除全局 AGENTS.md 中旧的两个小节（标记「可整体删除回滚」），改为依赖项目根 `AGENTS.md`（重新运行新 install 写入）
 
 更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；执行纪律的方法论总纲见 [docs/lean-execution.md](docs/lean-execution.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
 
