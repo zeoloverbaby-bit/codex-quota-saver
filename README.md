@@ -1,8 +1,8 @@
-# codex-three-tier-orchestration
+# codex-quota-saver
 
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。**
 
-这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
+这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
 
 ## 它解决什么（三个浪费口子）
 
@@ -31,6 +31,8 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 - **默认永不 spawn 子代理**（委派开销 > 工作本身 = 亏本买卖）；「重执行任务」且同时满足 4 条件才 spawn（规则见 `global/AGENTS.md`）
 - **疑难决策不在 Codex 内 spawn Sol 子代理**——STOP 报告，网页 GPT 分析后经 `next-step.md` 回流
 
+这两条纪律是 [docs/lean-execution.md](docs/lean-execution.md)「AI 执行治理八原则」在 Codex 语境的落地——额度浪费的第二来源是治理低效，原则总纲见该文档。
+
 ## 目录对照表（每个文件解决哪个痛点）
 
 | 路径 | 是什么 | 解决什么 |
@@ -44,6 +46,7 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | `project/web-gpt-project-prompt.md` | GPT 项目指令模板 | 分析层的行为规范（粘贴给网页 GPT，不装磁盘） |
 | `install.ps1` / `install.sh` | 一键安装 | 备份不删除、只追加不覆盖，见下节 |
 | `bridge/` | MCP 桥半自动部署（可选增强） | 网页 GPT 直连仓库免人工中转；`setup.ps1/.sh` 一条命令装完，用户只需创建连接器 + 输一次密码（生成的 `.local.*` 文件含密钥、已 gitignore） |
+| `docs/lean-execution.md` | AI 执行治理八原则（提炼版） | 治理低效也是额度浪费：连续执行 + STOP 稀缺 + Evidence 继承 + 验证成比例 |
 | `docs/pitfalls.md` | 15 个实测坑 | 部署与排障，人话版 |
 | `eval/` | A/B 评测方案 | 量化省了多少额度（协议 + 任务集 + 雷达图脚本） |
 
@@ -60,8 +63,8 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 ### 第 1 步 · 安装工具包
 
 ```bash
-git clone https://github.com/zeoloverbaby-bit/codex-three-tier-orchestration.git
-cd codex-three-tier-orchestration
+git clone https://github.com/zeoloverbaby-bit/codex-quota-saver.git
+cd codex-quota-saver
 ```
 
 ```powershell
@@ -140,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 - **官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）**：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤（[#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)）。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
 - 改动 AGENTS.md / config 后必须开新会话才生效
 
-更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
+更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；执行纪律的方法论总纲见 [docs/lean-execution.md](docs/lean-execution.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
 
 ## 上游与致谢
 

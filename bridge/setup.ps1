@@ -1,4 +1,4 @@
-﻿# codex-three-tier-orchestration: MCP 桥半自动部署（Windows PowerShell 5.1+）
+﻿# codex-quota-saver: MCP 桥半自动部署（Windows PowerShell 5.1+）
 # 流程：预检依赖 → 生成密钥 → 写 start-bridge.local.bat → 启动捕获模式
 #      → 用户创建连接器 → 轮询 ngrok API 捕获 client_id/redirect_uri → 回写并收尾。
 # 用户全程只需两件事：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
@@ -104,7 +104,7 @@ function Stop-ServerOnPort {
 if ($Domain -match "^https?://") { $Domain = ($Domain -replace "^https?://", "") }
 $Domain = $Domain.TrimEnd("/")
 
-Write-Host "== codex-three-tier-orchestration MCP bridge setup =="
+Write-Host "== codex-quota-saver MCP bridge setup =="
 Write-Host "DOMAIN    = $Domain"
 Write-Host "WORKSPACE = $Workspace"
 Write-Host "PORT      = $Port"

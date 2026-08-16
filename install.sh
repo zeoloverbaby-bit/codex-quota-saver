@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-three-tier-orchestration 安装脚本（macOS / Linux）
+# codex-quota-saver 安装脚本（macOS / Linux）
 # 用法: ./install.sh [CODEX_HOME] [PROJECT_PATH]
 # 行为: 备份不删除; config.toml 只追加 [agents] 段; AGENTS.md 只追加小节;
 #       项目级 config.toml / next-step.md 已存在则跳过（绝不覆盖真实任务数据）。
@@ -13,7 +13,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 backup() { [ -e "$1" ] && cp "$1" "$1.bak-$STAMP" && echo "[backup] $1 -> $1.bak-$STAMP"; }
 ensure_dir() { [ -d "$1" ] || mkdir -p "$1"; }
 
-echo "== codex-three-tier-orchestration installer =="
+echo "== codex-quota-saver installer =="
 echo "CODEX_HOME   = $CODEX_HOME"
 echo "PROJECT_PATH = ${PROJECT_PATH:-<未指定，跳过项目级文件>}"
 echo ""
@@ -45,7 +45,7 @@ if [ -f "$AG" ]; then
   else
     backup "$AG"
     {
-      printf '\n\n---\n\n## 以下内容由 codex-three-tier-orchestration 安装（可整体删除回滚）\n\n'
+      printf '\n\n---\n\n## 以下内容由 codex-quota-saver 安装（可整体删除回滚）\n\n'
       cat "$SRC"
     } >> "$AG"
     echo "[append] 路由规则小节 -> $AG"
