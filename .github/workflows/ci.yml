@@ -35,8 +35,10 @@ jobs:
           Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
           Import-Module Pester
           Invoke-Pester -Path tests/install.ps1.Tests.ps1 -Output Detailed -CI
-          # 排除三条风格类规则：CLI 脚本用 Write-Host 输出是对的；Tighten-Acl/New-Token 是内部辅助函数，不改变系统状态
-          $excluded = 'PSAvoidUsingWriteHost','PSUseApprovedVerbs','PSUseShouldProcessForStateChangingFunctions'
+          # 排除四条规则：CLI 脚本用 Write-Host 输出是对的；Tighten-Acl/New-Token 是内部辅助函数，不改变系统状态；
+          # -OAuthPassword 为本地 secrets 密码（crypto RNG 生成或用户显式传入，仅落盘 ACL 收紧的 .local.env，不经命令行），
+          # setup.ps1 内已用 SuppressMessage 就地标注（脚本级 param 块 PSSA 不采信属性，故在此兜底）
+          $excluded = 'PSAvoidUsingWriteHost','PSUseApprovedVerbs','PSUseShouldProcessForStateChangingFunctions','PSAvoidUsingPlainTextForPassword'
           $issues = Invoke-ScriptAnalyzer -Path install.ps1 -ExcludeRule $excluded
           $issues += Invoke-ScriptAnalyzer -Path bridge/setup.ps1 -ExcludeRule $excluded
           if ($issues) { $issues | Format-Table; exit 1 }
