@@ -1,0 +1,22 @@
+// bridge/guard/guard_config.example.json —— 示例配置，无密钥；真实值由 bridge/setup.* 生成并 gitignore
+{
+  "host": "127.0.0.1",
+  "port": 8766,
+  "workspace": "D:/path/to/your/repo",
+  "upstream_url": "http://127.0.0.1:8765/mcp",
+  "token_env": "CQS_GUARD_TOKEN",
+  "upstream_token_env": "CQS_UPSTREAM_TOKEN",
+  "allowlist": [
+    "server_info",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "view_image"
+  ]
+}
