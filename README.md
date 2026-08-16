@@ -1,14 +1,14 @@
-# codex-luna-orchestration
+# codex-three-tier-orchestration
 
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。**
 
-这是一个「三层架构」执行层的完整工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 GPT Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
+这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
 
 ## 它解决什么（三个浪费口子）
 
 | 痛点 | 浪费在哪 | 本仓库的药方 |
 |---|---|---|
-| 规划思考在 Codex 里烧 Sol | 分析、拆解、审查全走最贵档 | 三层架构：把「想」外置到网页 GPT（已付费的 Pro 额度） |
+| 规划思考在 Codex 里烧 Sol | 分析、拆解、审查全走最贵档 | 三层架构：把「想」外置到网页 GPT（已付费的网页额度） |
 | 所有任务无差别用 Sol | commit、merge 这种机械活也烧 Sol | 主线程默认 Luna Max + Sol 手动档（Luna 额度约为 Sol 的 20-25 倍） |
 | 子代理要么不用要么乱用 | 小活 spawn 亏委派开销，大活不 spawn 慢 | 规则化路由：默认不 spawn，4 条件才 spawn，有界执行包 |
 
@@ -17,7 +17,7 @@
 ## 方案一页看懂
 
 ```
-网页 GPT（Pro 网页额度）─ 规划 / 分析 / 审查 / 写 .codex/next-step.md
+网页 GPT（网页额度）─ 规划 / 分析 / 审查 / 写 .codex/next-step.md
         │  零思考执行指令
 Codex 主线程（默认 Luna Max）─ commit / merge / 批量 / 小修
         │  仅「重执行任务」才 spawn
@@ -47,13 +47,21 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | `docs/pitfalls.md` | 15 个实测坑 | 部署与排障，人话版 |
 | `eval/` | A/B 评测方案 | 量化省了多少额度（协议 + 任务集 + 雷达图脚本） |
 
-## 快速安装
+## 完整部署流程
 
-前置条件：Codex 订阅（App 或 CLI）、ChatGPT Pro 网页版。Windows 建议 PowerShell；macOS/Linux 用 bash 脚本。
+从零到跑起来，全程约 15 分钟（不含桥）。
+
+### 第 0 步 · 前置条件
+
+- **ChatGPT 账号**：Plus 或 Pro 均可（Pro 的网页额度更充裕）；**未充值的账号也能跑**，只是网页 GPT 与 Codex 的模型选择里都没有 Sol 档，方案退化为「Luna 为主 + 人把关」
+- **Codex**：App 或 CLI 都行（App 免费额度 / CLI 订阅额度都能用这套编排）
+- Windows 建议 PowerShell 5.1+；macOS/Linux 用 bash 脚本
+
+### 第 1 步 · 安装工具包
 
 ```bash
-git clone https://github.com/zeoloverbaby-bit/codex-luna-orchestration.git
-cd codex-luna-orchestration
+git clone https://github.com/zeoloverbaby-bit/codex-three-tier-orchestration.git
+cd codex-three-tier-orchestration
 ```
 
 ```powershell
@@ -66,7 +74,46 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 ./install.sh ~/.codex /path/to/your/repo
 ```
 
-装完记得：Codex **App 设置-配置**开启 reasoning effort 的 max 档位（否则 config 里的 max 被静默降级），然后**新会话**才生效。
+脚本装了哪些文件、动了哪些既有文件，见下方「安装脚本的行为边界」。
+
+### 第 2 步 · Codex App 开启推理档位
+
+打开 Codex **App 设置-配置**，开启 reasoning effort 的 **max** 档——否则 config 里的 max 被静默降级为 medium。改完开**新会话**才生效。
+
+### 第 3 步 · 部署 MCP 桥（可选增强，约 10 分钟）
+
+想让网页 GPT 直接读写仓库（免人工中转 next-step.md）才做这一步：
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok静态域名> -Workspace <项目路径>
+# macOS / Linux
+./bridge/setup.sh <你的ngrok静态域名> <项目路径>
+```
+
+一条命令自动装完依赖、生成密钥、捕获连接器参数；你全程只需两件事（脚本会提示时机）：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
+
+> 没桥也能跑三层架构：GPT 把 `.codex/next-step.md` 全文输出给你，手动落盘即可。桥的完整说明、手动兜底与冒烟测试见 [bridge/README.md](bridge/README.md)。
+
+### 第 4 步 · 配置网页 GPT（分析层）
+
+打开 ChatGPT 网页版 → **新对话** → 把 `project/web-gpt-project-prompt.md` 的全文粘贴为第一条消息（或用 ChatGPT 项目指令功能固定它）。
+
+这份指令规定分析层的行为：只读仓库、只写 `.codex/next-step.md`、不执行代码、疑难决策报告你。
+
+### 第 5 步 · 首次运转（先拿小任务试跑）
+
+1. 给网页 GPT 一个小任务（如「读这个仓库的 README，提出 3 条改进建议」）
+2. 把 GPT 产出的 `.codex/next-step.md`（或全文）落到项目根目录
+3. Codex 开**新会话**，说一句：*「读 .codex/next-step.md，按文档执行，完成后输出执行报告」*
+4. 用执行报告对照 GPT 给的验证步骤，核对结果一致
+
+### 第 6 步 · 部署验收清单
+
+- [ ] Codex 新会话模型显示 **Luna + max 档**（显示 medium = 第 2 步没做对；以会话实际显示为准）
+- [ ] 新会话让它「读 AGENTS.md，复述我的编排规则」——能讲出「默认不 spawn + 4 条件」纪律
+- [ ] 第一次 spawn 子代理后，核对 rollout 实际模型是 `gpt-5.6-luna`（见已知问题 #32587）
+- [ ] （部署了桥）[bridge/README.md](bridge/README.md) 冒烟测试三连通过
 
 ## 安装脚本的行为边界（重要）
 
@@ -76,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 
-## 每日使用节奏（5 步）
+## 部署完成后，每天就 5 步
 
 1. 网页 ChatGPT **新对话** → 粘贴 `project/web-gpt-project-prompt.md` 作为项目指令 → 给任务
 2. GPT 分析后只写 `.codex/next-step.md`（覆盖式：当前状态 / 唯一下一步 / 验证步骤 / 风险提示）
@@ -85,8 +132,6 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 5. GPT 用 git 核对结果 → 更新 next-step.md → 闭环
 
 两个「新」不能省：ChatGPT 的对话是工具快照（旧对话看不到新连接器）；Codex 的 AGENTS.md 改动要新会话才生效。
-
-> 可选增强：想让网页 GPT 直接读写仓库（免人工中转），按 `bridge/README.md` 部署 MCP 桥（含 OAuth 稳定性三件套与冒烟测试）。
 
 ## 已知问题（诚实条款）
 

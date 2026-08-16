@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-luna-orchestration: MCP 桥半自动部署（macOS / Linux）
+# codex-three-tier-orchestration: MCP 桥半自动部署（macOS / Linux）
 # 流程：预检依赖 → 生成密钥 → 写 start-bridge.local.sh → 启动捕获模式
 #      → 用户创建连接器 → 轮询 ngrok API 捕获 client_id/redirect_uri → 回写并收尾。
 # 用户全程只需两件事：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
@@ -23,7 +23,7 @@ rand_str() {  # $1=长度 $2=字符集
   python3 -c "import secrets,sys; s=sys.argv[1]; print(''.join(secrets.choice(s) for _ in range(int(sys.argv[2]))))" "$2" "$1"
 }
 
-echo "== codex-luna-orchestration MCP bridge setup =="
+echo "== codex-three-tier-orchestration MCP bridge setup =="
 echo "DOMAIN    = $DOMAIN"
 echo "WORKSPACE = $WORKSPACE"
 echo "PORT      = $PORT"

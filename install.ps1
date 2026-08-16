@@ -1,4 +1,4 @@
-﻿# codex-luna-orchestration 安装脚本（Windows PowerShell 5.1+）
+﻿# codex-three-tier-orchestration 安装脚本（Windows PowerShell 5.1+）
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-CodexHome <dir>] [-ProjectPath <repo>]
 # 行为: 备份不删除; config.toml 只追加 [agents] 段; AGENTS.md 只追加小节;
@@ -13,7 +13,7 @@ $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = "Stop"
 
-Write-Host "== codex-luna-orchestration installer =="
+Write-Host "== codex-three-tier-orchestration installer =="
 Write-Host "CODEX_HOME   = $CodexHome"
 $ProjDisplay = $ProjectPath
 if ($ProjectPath -eq "") { $ProjDisplay = "<未指定，跳过项目级文件>" }
@@ -59,7 +59,7 @@ if (Test-Path $Ag) {
     Write-Host "[skip] AGENTS.md 已含路由规则小节"
   } else {
     Backup-File $Ag
-    $Header = "`r`n`r`n---`r`n`r`n## 以下内容由 codex-luna-orchestration 安装（可整体删除回滚）`r`n`r`n"
+    $Header = "`r`n`r`n---`r`n`r`n## 以下内容由 codex-three-tier-orchestration 安装（可整体删除回滚）`r`n`r`n"
     [System.IO.File]::AppendAllText($Ag, $Header + $AgContent, $Utf8NoBom)
     Write-Host "[append] 路由规则小节 -> $Ag"
   }
