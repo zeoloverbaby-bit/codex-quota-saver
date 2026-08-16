@@ -50,14 +50,14 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
     return @{action='append';dest=$Path;backup=$backup;id=$Id;created=(-not $existed)}
 }
 
-# 按标记精确移除托管块；无块则跳过
-function Remove-ManagedBlock([string]$Path, [string]$Id) {
+# 按标记精确移除托管块；无块则跳过。begin/end 可自定义（TOML 段用 # 注释标记）
+function Remove-ManagedBlock([string]$Path, [string]$Id, [string]$Begin, [string]$End) {
     if (-not (Test-Path $Path)) { return @{action='skip';dest=$Path;reason='missing'} }
     $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
-    $begin = "<!-- cqs-managed-block:$Id begin -->"
-    $end   = "<!-- cqs-managed-block:$Id end -->"
-    if (-not $raw.Contains($begin)) { return @{action='skip';dest=$Path;reason='block-absent'} }
-    $pattern = "(?ms)\r?\n?<!-- cqs-managed-block:$Id begin -->.*?<!-- cqs-managed-block:$Id end -->\r?\n?"
+    if (-not $Begin) { $Begin = "<!-- cqs-managed-block:$Id begin -->" }
+    if (-not $End)   { $End   = "<!-- cqs-managed-block:$Id end -->" }
+    if (-not $raw.Contains($Begin)) { return @{action='skip';dest=$Path;reason='block-absent'} }
+    $pattern = "(?ms)\r?\n?" + [regex]::Escape($Begin) + ".*?" + [regex]::Escape($End) + "\r?\n?"
     $new = [regex]::Replace($raw, $pattern, "`n")
     Set-Content -Path $Path -Value $new -Encoding UTF8 -NoNewline
     return @{action='remove-block';dest=$Path;id=$Id}
@@ -118,16 +118,21 @@ function Invoke-Uninstall([string]$CodexHome) {
     $dirty = $false
     foreach ($e in $entries) {
         if ($e.id) {
+            $tBegin = $null; $tEnd = $null
+            if ($e.id -eq 'agents-toml') {
+                $tBegin = '# --- codex-quota-saver managed [agents] begin ---'
+                $tEnd   = '# --- codex-quota-saver managed [agents] end ---'
+            }
             if ($e.created) {
                 # 该文件由安装创建 → 整删（先确认未混入用户内容：只含托管块则删，否则只摘块）
                 if (Test-Path $e.dest) {
-                    Remove-ManagedBlock -Path $e.dest -Id $e.id | Out-Null
+                    Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
                     $left = "$(Get-Content $e.dest -Raw -Encoding UTF8)".Trim()
                     if ([string]::IsNullOrEmpty($left)) { Remove-Item $e.dest -Force; Write-Host "已移除（安装创建）: $($e.dest)" }
                     else { Write-Host "含用户内容，保留文件（托管块已摘除）: $($e.dest)" }
                 }
             } else {
-                Remove-ManagedBlock -Path $e.dest -Id $e.id | Out-Null
+                Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
                 Write-Host "托管块已摘除: $($e.dest)"
             }
         }

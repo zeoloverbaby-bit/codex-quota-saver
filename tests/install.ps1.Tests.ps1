@@ -36,6 +36,12 @@ Describe 'Merge-AgentsToml' {
         (Get-Content $f -Raw) -match 'default_subagent_model' | Should -BeTrue
         (Get-ChildItem "$TestDrive/*.bak*").Count | Should -Be 1
     }
+    It 'TOML 托管段可被带自定义标记的 Remove-ManagedBlock 摘除' {
+        $f = New-Item -ItemType File "$TestDrive/config-c.toml"
+        Merge-AgentsToml -Path $f -DryRun:$false | Out-Null
+        Remove-ManagedBlock -Path $f -Id 'agents-toml' -Begin '# --- codex-quota-saver managed [agents] begin ---' -End '# --- codex-quota-saver managed [agents] end ---'
+        (Get-Content $f -Raw) -match 'default_subagent_model' | Should -BeFalse
+    }
 }
 
 Describe 'Manifest 往返' {
