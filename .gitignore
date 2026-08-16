@@ -1,2 +1,10 @@
 *.bak-*
 bridge/*.local.*
+# bridge guard
+bridge/guard/guard_config.json
+bridge/guard/.venv/
+bridge/.secrets.local.env
+.venv-guard/
+# python
+__pycache__/
+*.pyc
