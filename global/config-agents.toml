@@ -1,0 +1,7 @@
+# codex-luna-orchestration: 子代理默认模型（由 install 脚本追加到 ~/.codex/config.toml 末尾）
+# 网上流传的 [features.multi_agent_v2] 配置键查无实据，不要用；子代理默认模型就是本 [agents] 段。
+[agents]
+enabled = true
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "max"
+max_concurrent_threads_per_session = 6
