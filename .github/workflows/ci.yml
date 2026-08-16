@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y shellcheck bats
+      - name: ShellCheck
+        run: shellcheck install.sh bridge/setup.sh
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install python deps
+        run: pip install pytest -r eval/requirements.txt -r bridge/guard/requirements.txt
+      - name: Pytest
+        run: python -m pytest tests/ -q
+      - name: Bats (installer)
+        run: bats tests/install.bats
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pester + PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -Force -SkipPublisherCheck -Scope CurrentUser
+          Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester
+          Invoke-Pester -Script tests/install.ps1.Tests.ps1 -Output Detailed -CI
+          $issues = Invoke-ScriptAnalyzer -Path install.ps1, bridge/setup.ps1
+          if ($issues) { $issues | Format-Table; exit 1 }
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --accept 200,204,301,302,429 --no-progress '*.md'
