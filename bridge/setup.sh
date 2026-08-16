@@ -48,14 +48,16 @@ export CQS_UPSTREAM_TOKEN=$UP_TOK
 EOF
 chmod 600 "$ENV_FILE"
 
+# shellcheck disable=SC2086  # $ALLOWLIST 故意的分词（拆成 JSON 数组元素）
+ALLOWLIST_JSON=$(printf '"%s", ' $ALLOWLIST | sed 's/, $//')
+
 cat > "$GUARD_CONF" <<EOF
 {
   "host": "127.0.0.1", "port": $GUARD_PORT,
   "workspace": "$WORKSPACE",
   "upstream_url": "http://127.0.0.1:$UPSTREAM_PORT/mcp",
   "token_env": "CQS_GUARD_TOKEN", "upstream_token_env": "CQS_UPSTREAM_TOKEN",
-  # shellcheck disable=SC2086  # $ALLOWLIST 故意的分词（拆成 JSON 数组元素）
-  "allowlist": [$(printf '"%s", ' $ALLOWLIST | sed 's/, $//')]
+  "allowlist": [$ALLOWLIST_JSON]
 }
 EOF
 chmod 600 "$GUARD_CONF"
