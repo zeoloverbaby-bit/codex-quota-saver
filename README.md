@@ -1,5 +1,7 @@
 # codex-quota-saver
 
+> **Status: Public Alpha / Experimental**——思路与文档完整、可实际运行，但安全边界、CI、卸载路径仍在 hardening 中（gate 见 [Roadmap](#roadmap)）。个人或熟人小团队自用足够；把它装进重要生产仓库前，请先读 [SECURITY.md](SECURITY.md)。
+
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。** 两个浪费源：**档位浪费**（规划、机械活烧着最贵的 Sol）与**过度治理**（本应在任务内自动收敛的工程问题，被错误升级成人工 Gate、全量重验——每一轮无谓的 STOP 都在烧最贵的 token 和你的注意力）。
 
 这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
@@ -8,7 +10,7 @@
 
 **痛点 1 · 额度不够用**：项目开发/实施中 Codex 额度消耗快，还没干完就没了。
 
-药方 = 三层架构「续命」：大头分析、审查放网页 GPT（已付费的网页额度）；Codex 只做执行——主线程默认 Luna Max（Luna 额度约为 Sol 的 20-25 倍），高难度任务才手动切 Sol，仅「重执行任务」才 spawn 有界子代理；人在重要节点授权。
+药方 = 三层架构「续命」：大头分析、审查放网页 GPT（已付费的网页额度）；Codex 只做执行——主线程默认 Luna Max（基于当前账户观察，假设 Luna 相对 Sol 有显著额度优势，暂估 20-25 倍；正式评测前重新校准，见 eval/README §2.2 系数复核提醒），高难度任务才手动切 Sol，仅「重执行任务」才 spawn 有界子代理；人在重要节点授权。
 
 **痛点 2 · Sol 过度治理**：把本应在已授权任务内自动收敛的工程问题（普通 RED、typing、fixture、CLI 适配…），错误升级成人工 Gate、全量重验、治理事件——每一轮无谓的 STOP 和重跑都在烧最贵的 token 和你的注意力。
 
@@ -140,12 +142,24 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## 已知问题（诚实条款）
 
-- **issue #32587（Open）**：子代理可能静默继承父模型。首次 spawn 后必须核对 rollout 实际模型是否为 `gpt-5.6-luna`（验证门槛已写入 AGENTS.md 与 luna-routing skill）
-- **App 档位白名单**：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
-- **官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）**：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤（[#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)）。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
-- 改动 AGENTS.md / config 后必须开新会话才生效
+每条已知问题标注类型与验证时间（口径：**Stable contract** = 官方契约 / **Observed behavior** = 本仓库实测 / **Known upstream bug** = 上游缺陷跟踪）：
+
+- **Known upstream bug · #32587（Open，verified_at=2026-08-16）**：子代理可能静默继承父模型。首次 spawn 后必须核对 rollout 实际模型是否为 `gpt-5.6-luna`（验证门槛已写入 AGENTS.md 与 luna-routing skill）
+- **Observed behavior · verified_at=2026-08-16**：App 档位白名单：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
+- **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-16）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
+- **Observed behavior · verified_at=2026-08-16**：改动 AGENTS.md / config 后必须开新会话才生效
 
 更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；执行纪律的方法论总纲见 [docs/lean-execution.md](docs/lean-execution.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
+
+## Roadmap 与稳定 Gate
+
+以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
+
+- [ ] 安全边界硬化：MCP 桥能力层白名单（bridge-guard）已发布
+- [ ] CI 三平台绿（installer / eval / 静态检查）
+- [ ] installer 幂等 / dry-run / uninstall / rollback 测试通过
+- [ ] A/B 评测数据产出（协议见 eval/，n 小不宣称统计显著）
+- [ ] 干净卸载路径验证
 
 ## 上游与致谢
 
