@@ -56,6 +56,8 @@ model_reasoning_effort = "high"
 | 子代理 | luna_worker（规则化 spawn） | 官方 Luna 委派（prompt 路由） |
 | 规划环节 | 网页 GPT 写 next-step.md | 两个子方案：C1 = 同样走网页 GPT 交接；C2 = Codex 内闭环（Sol 自规划） |
 
+> 口径注记（2026-08-16）：Multi Agents v2 的**官宣**（Stable contract）与地面可用性（Known upstream bug，#36294/#35097）是两回事；网上流传的 `features.multi_agent_v2` **配置键**经同日验证查无实据（见 `global/config-agents.toml` 注释）。本协议只依据官宣 + issue 状态登记候选臂。
+
 **触发条件（同时满足才启动，届时单独预注册）**：
 1. 官方修复落地——社区确认 V2 `spawn_agent` 不再把 Luna 当 V1 过滤（跟踪 issue #36294 / #35097；2026-08-16 仍 Open）
 2. #32587（子代理静默继承父模型）经实测确认修复，或 C 臂的 prompt 路由经 rollout 核对稳定
@@ -295,9 +297,17 @@ ledger.csv 直接呈现（附录 C 表头）。
 
 ---
 
-## 附录 A：雷达图渲染脚本
+## 附录 A：评测运行工具链
 
-见本目录 [`radar.py`](radar.py)（matplotlib 骨架，填实测数据即出 PNG）。
+管道：`collect.py`（session JSONL → raw_runs.jsonl）→ `score.py`（ledger.csv + raw_runs.jsonl → results.csv）→ `radar.py`（results.csv → PNG）
+
+```bash
+python eval/collect.py --session <session.jsonl> --run-id r1 --out raw_runs.jsonl
+python eval/score.py --ledger ledger.csv --raw raw_runs.jsonl --coeff 0.05 --out results.csv
+python eval/radar.py --csv results.csv
+```
+
+依赖见 `eval/requirements.txt`；管道单测在 `tests/test_eval.py`。radar 无数据时打印用法并以退出码 1 结束（不再需要改源码填列表）。
 
 ## 附录 B：B 臂网页 GPT 固定话术（新对话开场）
 
@@ -319,3 +329,19 @@ run_id,tier,task,arm,order,date,main_model,main_effort,sub_model,sub_effort,main
 
 - `quota_units` 计算：Sol token ×1 + Luna token ×1/20（main 与 sub 分开算再求和）
 - `order`：本任务内的执行次序（1/2，用于 ABBA 与学习效应披露）
+
+---
+
+## 协议 B（设计附录，冻结外）：为什么省——2×2 factorial
+
+协议 A 回答「整套工作流值不值得用」；本附录回答「改善来自哪个因子」。**未预注册、未冻结、不执行**，等协议 A 数据产出后再决定是否启动（届时单独预注册）。
+
+| | Codex 自规划 | Web GPT 规划 |
+|---|---|---|
+| Sol 执行 | A（协议 A 已有） | C |
+| Luna 执行 | D | B（协议 A 已有） |
+
+- 规划分离效应 = A-C（或 D-B）；模型档位效应 = A-D（或 C-B）；交互效应 = (A+B)-(C+D)
+- 增量成本：协议 A 已含 A/B 两格，仅需补 C/D 两格（时间预算 ×2）
+- 触发条件：协议 A 有效或部分有效（§7 判定）→ 值得拆因子归因；协议 A 无效 → 先查档位与系数，不急着 factorial
+- 环境与口径完全沿用协议 A（含 §2.2 系数复核、§1.1 A 臂隔离）

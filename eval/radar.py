@@ -1,15 +1,16 @@
-"""AB 评测雷达图生成：A 臂 = 100 基准圆，B 臂 = 实测得分多边形
-
-用法：把实测的六维 r_geo 填进 main() 的两个列表后运行：
-    python radar.py
-输出 radar_main.png（全任务）与 radar_t1.png .. radar_t4.png（分层，选做）。
-
-依赖：matplotlib、numpy
+"""AB 评测雷达图生成：results.csv（score.py 输出）→ PNG
+用法: python radar.py --csv results.csv
+无数据时打印用法说明并以退出码 1 结束（不再需要改源码填列表）。
 """
+import argparse
+import csv
+import sys
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 LABELS = ["额度经济性", "测试通过率", "返工轮数", "完成时间", "人工干预", "范围控制"]
+COLS = ["quota_econ", "pass_rate", "rework", "wall_time", "interventions", "scope"]
 
 
 def radar(scores_b, title, filename, n_note):
@@ -37,12 +38,22 @@ def radar(scores_b, title, filename, n_note):
 
 
 def main():
-    # —— 填实测数据：全部 run 的六维几何平均 r_geo × 100（顺序与 LABELS 一致）——
-    radar([], "三层架构 vs 老方法 · 全任务", "radar_main.png",
-          n_note="T1-3 各2任务/T4 1任务")
-    # 分层雷达（选做）：每级一张
-    for i in range(1, 5):
-        radar([], f"T{i} 级", f"radar_t{i}.png", n_note="2任务")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", required=True)
+    args = ap.parse_args()
+    try:
+        with open(args.csv, encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except FileNotFoundError:
+        print(f"找不到 {args.csv}：请先运行 collect.py → score.py 生成 results.csv")
+        sys.exit(1)
+    if not rows:
+        print("results.csv 为空：先跑完评测并用 collect.py/score.py 填数")
+        sys.exit(1)
+    for r in rows:
+        scores = [min(float(r[c]) * 100, 200) for c in COLS]
+        radar(scores, f"三层架构 vs 老方法 · {r['tier']}", f"radar_{r['tier']}.png",
+              n_note=f"n={r['n']}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # codex-quota-saver
 
+> **Status: Public Alpha / Experimental**——思路与文档完整、可实际运行，但安全边界、CI、卸载路径仍在 hardening 中（gate 见 [Roadmap](#roadmap)）。个人或熟人小团队自用足够；把它装进重要生产仓库前，请先读 [SECURITY.md](SECURITY.md)。
+
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。** 两个浪费源：**档位浪费**（规划、机械活烧着最贵的 Sol）与**过度治理**（本应在任务内自动收敛的工程问题，被错误升级成人工 Gate、全量重验——每一轮无谓的 STOP 都在烧最贵的 token 和你的注意力）。
 
 这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 15 个实测坑的排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
@@ -8,7 +10,7 @@
 
 **痛点 1 · 额度不够用**：项目开发/实施中 Codex 额度消耗快，还没干完就没了。
 
-药方 = 三层架构「续命」：大头分析、审查放网页 GPT（已付费的网页额度）；Codex 只做执行——主线程默认 Luna Max（Luna 额度约为 Sol 的 20-25 倍），高难度任务才手动切 Sol，仅「重执行任务」才 spawn 有界子代理；人在重要节点授权。
+药方 = 三层架构「续命」：大头分析、审查放网页 GPT（已付费的网页额度）；Codex 只做执行——主线程默认 Luna Max（基于当前账户观察，假设 Luna 相对 Sol 有显著额度优势，暂估 20-25 倍；正式评测前重新校准，见 eval/README §2.2 系数复核提醒），高难度任务才手动切 Sol，仅「重执行任务」才 spawn 有界子代理；人在重要节点授权。
 
 **痛点 2 · Sol 过度治理**：把本应在已授权任务内自动收敛的工程问题（普通 RED、typing、fixture、CLI 适配…），错误升级成人工 Gate、全量重验、治理事件——每一轮无谓的 STOP 和重跑都在烧最贵的 token 和你的注意力。
 
@@ -40,15 +42,19 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | 路径 | 是什么 | 解决什么 |
 |---|---|---|
 | `global/config-agents.toml` | `[agents]` 段模板 | 子代理默认用 Luna Max、并发上限 6 |
-| `global/AGENTS.md` | 路由规则 + 协作协议 | 「默认不 spawn + 4 条件」纪律；执行层职责边界 |
+| `global/AGENTS.md` | 子代理路由硬规则（全局） | 「默认不 spawn + 4 条件」纪律 |
 | `global/agents/luna-worker.toml` | 子代理定义 | 有界执行包（文件互斥、7 类 STOP 条件、不宣称验收） |
 | `project/dot-codex/config.toml` | 项目级配置 | 该项目主线程 = Luna Max（按项目分层，其他项目不受影响） |
+| `project/AGENTS.md` | 三层协作协议（项目级模板） | 三层角色与执行层职责只进本项目，不污染其他仓库 |
 | `project/dot-codex/next-step.md` | 交接协议模板 | 网页 GPT → Codex 的零思考指令格式 |
 | `project/dot-codex/skills/luna-routing/SKILL.md` | 路由决策技能 | spawn 判定决策树 + 执行包模板 + 验证门槛 |
 | `project/web-gpt-project-prompt.md` | GPT 项目指令模板 | 分析层的行为规范（粘贴给网页 GPT，不装磁盘） |
 | `install.ps1` / `install.sh` | 一键安装 | 备份不删除、只追加不覆盖，见下节 |
 | `bridge/` | MCP 桥半自动部署（可选增强） | 网页 GPT 直连仓库免人工中转；`setup.ps1/.sh` 一条命令装完，用户只需创建连接器 + 输一次密码（生成的 `.local.*` 文件含密钥、已 gitignore） |
 | `docs/lean-execution.md` | AI 执行治理八原则（提炼版） | 治理低效也是额度浪费：连续执行 + STOP 稀缺 + Evidence 继承 + 验证成比例 |
+| `COMPATIBILITY.md` | 兼容性矩阵 + 版本 pin | 今天能跑 → clone 后也能跑 |
+| `SECURITY.md` | 安全边界与免责声明 | 部署前必读 |
+| `CHANGELOG.md` | 版本历史 | 判断要不要升级 |
 | `docs/pitfalls.md` | 15 个实测坑 | 部署与排障，人话版 |
 | `eval/` | A/B 评测方案 | 量化省了多少额度（协议 + 任务集 + 雷达图脚本） |
 
@@ -124,8 +130,11 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 - **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西
 - `config.toml`：只追加 `[agents]` 段；已有 `[agents]` 则跳过
-- `AGENTS.md`：不存在则创建；已存在则**追加**两个小节（带「可整体删除回滚」标记），不覆盖你原有内容
+- `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容
+- 三层协作协议写入**项目根** `AGENTS.md`（项目级指令），不再追加到全局 `~/.codex/AGENTS.md`——其他仓库不受三层协议影响
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
+- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚；项目数据文件与 .bak 一律保留，不自动删除）
+- 每次安装落一份 manifest 到 `~/.codex/.codex-quota-saver-manifest.*`，重复安装幂等
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 
 ## 部署完成后，每天就 5 步
@@ -140,12 +149,25 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## 已知问题（诚实条款）
 
-- **issue #32587（Open）**：子代理可能静默继承父模型。首次 spawn 后必须核对 rollout 实际模型是否为 `gpt-5.6-luna`（验证门槛已写入 AGENTS.md 与 luna-routing skill）
-- **App 档位白名单**：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
-- **官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）**：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤（[#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)）。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
-- 改动 AGENTS.md / config 后必须开新会话才生效
+每条已知问题标注类型与验证时间（口径：**Stable contract** = 官方契约 / **Observed behavior** = 本仓库实测 / **Known upstream bug** = 上游缺陷跟踪）：
+
+- **Known upstream bug · #32587（Open，verified_at=2026-08-16）**：子代理可能静默继承父模型。首次 spawn 后必须核对 rollout 实际模型是否为 `gpt-5.6-luna`（验证门槛已写入 AGENTS.md 与 luna-routing skill）
+- **Observed behavior · verified_at=2026-08-16**：App 档位白名单：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
+- **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-16）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
+- **Observed behavior · verified_at=2026-08-16**：改动 AGENTS.md / config 后必须开新会话才生效
+- **Observed behavior · verified_at=2026-08-16**：v1.5.0 及以前安装会把三层协议追加到全局 `~/.codex/AGENTS.md`。升级到 v1.6.0 后建议迁移：删除全局 AGENTS.md 中旧的两个小节（标记「可整体删除回滚」），改为依赖项目根 `AGENTS.md`（重新运行新 install 写入）
 
 更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；执行纪律的方法论总纲见 [docs/lean-execution.md](docs/lean-execution.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
+
+## Roadmap 与稳定 Gate
+
+以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
+
+- [x] 安全边界硬化：MCP 桥能力层白名单 + 自建 OAuth 认证（bridge-guard）已发布
+- [x] CI 三平台绿（installer / eval / 静态检查 / gitleaks / link check）
+- [x] installer 幂等 / dry-run / uninstall / rollback 测试通过
+- [ ] A/B 评测数据产出（协议见 eval/，n 小不宣称统计显著）
+- [x] 干净卸载路径验证
 
 ## 上游与致谢
 

@@ -1,112 +1,209 @@
-﻿# codex-quota-saver 安装脚本（Windows PowerShell 5.1+）
+﻿#requires -Version 5.1
+# codex-quota-saver installer（本文件必须 UTF-8 带 BOM）
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-CodexHome <dir>] [-ProjectPath <repo>]
-# 行为: 备份不删除; config.toml 只追加 [agents] 段; AGENTS.md 只追加小节;
-#       项目级 config.toml / next-step.md 已存在则跳过（绝不覆盖真实任务数据）。
+#   .\install.ps1 -ProjectPath D:\path\to\repo                 # 安装
+#   .\install.ps1 -ProjectPath D:\path\to\repo -DryRun         # 演练
+#   .\install.ps1 -Uninstall [-CodexHome <dir>]                # 按 manifest 卸载
 param(
-  [string]$CodexHome = (Join-Path $env:USERPROFILE ".codex"),
-  [string]$ProjectPath = ""
+    [Parameter(Mandatory=$false)][string]$ProjectPath,
+    [Parameter(Mandatory=$false)][string]$CodexHome = "$env:USERPROFILE\.codex",
+    [switch]$DryRun,
+    [switch]$Uninstall
 )
 
+$ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
-$Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$ErrorActionPreference = "Stop"
 
-Write-Host "== codex-quota-saver installer =="
-Write-Host "CODEX_HOME   = $CodexHome"
-$ProjDisplay = $ProjectPath
-if ($ProjectPath -eq "") { $ProjDisplay = "<未指定，跳过项目级文件>" }
-Write-Host "PROJECT_PATH = $ProjDisplay"
-Write-Host ""
+function Get-Timestamp { Get-Date -Format 'yyyyMMdd-HHmmss' }
+function Get-Sha256([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).Hash }
+function Get-ManifestPath([string]$CodexHome) { Join-Path $CodexHome '.codex-quota-saver-manifest.json' }
 
-function Backup-File([string]$Path) {
-  if (Test-Path $Path) {
-    $Bak = "$Path.bak-$Stamp"
-    Copy-Item $Path $Bak -Force
-    Write-Host "[backup] $Path -> $Bak"
-  }
+function Read-Manifest([string]$Path) {
+    if (-not (Test-Path $Path)) { return @() }
+    # -Raw 单字符串入 ConvertFrom-Json；返回数组由 PowerShell 自然展开，调用方统一 @() 包裹
+    return (Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
-function Ensure-Dir([string]$Path) {
-  if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Force $Path | Out-Null }
+function Write-Manifest([string]$Path, [array]$Entries) {
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    ($Entries | ConvertTo-Json -Depth 4) | Set-Content -Path $Path -Encoding UTF8
 }
 
-# 1. config.toml: 追加 [agents] 段（已存在则跳过）
-$Cfg = Join-Path $CodexHome "config.toml"
-$AgentsBlock = [System.IO.File]::ReadAllText((Join-Path $RepoRoot "global\config-agents.toml"), $Utf8NoBom)
-if (Test-Path $Cfg) {
-  $Existing = [System.IO.File]::ReadAllText($Cfg, $Utf8NoBom)
-  if ($Existing -match "(?m)^\s*\[agents\]") {
-    Write-Host "[skip] config.toml 已有 [agents] 段"
-  } else {
-    Backup-File $Cfg
-    [System.IO.File]::AppendAllText($Cfg, "`r`n`r`n" + $AgentsBlock, $Utf8NoBom)
-    Write-Host "[append] [agents] 段 -> $Cfg"
-  }
-} else {
-  Ensure-Dir $CodexHome
-  [System.IO.File]::WriteAllText($Cfg, $AgentsBlock, $Utf8NoBom)
-  Write-Host "[create] $Cfg"
-}
-
-# 2. AGENTS.md: 不存在则创建; 已存在则追加小节（不覆盖）
-$Ag = Join-Path $CodexHome "AGENTS.md"
-$AgContent = [System.IO.File]::ReadAllText((Join-Path $RepoRoot "global\AGENTS.md"), $Utf8NoBom)
-if (Test-Path $Ag) {
-  $Existing = [System.IO.File]::ReadAllText($Ag, $Utf8NoBom)
-  if ($Existing -match "子代理使用规则") {
-    Write-Host "[skip] AGENTS.md 已含路由规则小节"
-  } else {
-    Backup-File $Ag
-    $Header = "`r`n`r`n---`r`n`r`n## 以下内容由 codex-quota-saver 安装（可整体删除回滚）`r`n`r`n"
-    [System.IO.File]::AppendAllText($Ag, $Header + $AgContent, $Utf8NoBom)
-    Write-Host "[append] 路由规则小节 -> $Ag"
-  }
-} else {
-  Ensure-Dir $CodexHome
-  [System.IO.File]::WriteAllText($Ag, $AgContent, $Utf8NoBom)
-  Write-Host "[create] $Ag"
-}
-
-# 3. luna-worker.toml: 备份 + 复制
-$WorkerSrc = Join-Path $RepoRoot "global\agents\luna-worker.toml"
-$WorkerDst = Join-Path $CodexHome "agents\luna-worker.toml"
-Ensure-Dir (Split-Path $WorkerDst -Parent)
-Backup-File $WorkerDst
-Copy-Item $WorkerSrc $WorkerDst -Force
-Write-Host "[install] $WorkerDst"
-
-# 4. 项目级文件（-ProjectPath 指定时）
-if ($ProjectPath -ne "") {
-  $Pairs = @(
-    @{ Src = "project\dot-codex\config.toml";                  Dst = ".codex\config.toml";  OverwriteIfExists = $false },
-    @{ Src = "project\dot-codex\next-step.md";                 Dst = ".codex\next-step.md"; OverwriteIfExists = $false },
-    @{ Src = "project\dot-codex\skills\luna-routing\SKILL.md"; Dst = ".codex\skills\luna-routing\SKILL.md"; OverwriteIfExists = $true }
-  )
-  foreach ($P in $Pairs) {
-    $Src = Join-Path $RepoRoot $P.Src
-    $Dst = Join-Path $ProjectPath $P.Dst
-    if (Test-Path $Dst) {
-      if ($P.OverwriteIfExists) {
-        Backup-File $Dst
-        Copy-Item $Src $Dst -Force
-        Write-Host "[update] $Dst"
-      } else {
-        Write-Host "[skip] 已存在，保留你的版本: $Dst"
-      }
-    } else {
-      Ensure-Dir (Split-Path $Dst -Parent)
-      Copy-Item $Src $Dst -Force
-      Write-Host "[install] $Dst"
+# 追加带标记的托管块；幂等：已有该块则跳过。所有返回条目都带 id 与 created（卸载据此精确回滚）
+function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$DryRun) {
+    $begin = "<!-- cqs-managed-block:$Id begin -->"
+    $end   = "<!-- cqs-managed-block:$Id end -->"
+    $existed = Test-Path $Path
+    if ($existed) {
+        $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
+        if ($raw.Contains($begin)) { return @{action='skip';dest=$Path;reason='block-present';id=$Id;created=$false} }
     }
-  }
-} else {
-  Write-Host "[skip] 未指定 -ProjectPath，跳过项目级文件（用法: .\install.ps1 -ProjectPath <你的仓库路径>）"
+    $block = "`n$begin`n$Content`n$end`n"
+    if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
+    $backup = $null
+    if ($existed) {
+        $backup = "$Path.bak-$(Get-Timestamp)"
+        Copy-Item $Path $backup -Force
+    }
+    Add-Content -Path $Path -Value $block -Encoding UTF8
+    return @{action='append';dest=$Path;backup=$backup;id=$Id;created=(-not $existed)}
 }
 
-Write-Host ""
-Write-Host "完成。下一步："
-Write-Host "1. Codex App 设置-配置 开启 reasoning effort 档位（含 max）"
-Write-Host "2. Codex 开新会话（AGENTS.md / config 改动需新会话才生效）"
-Write-Host "3. 首次 spawn 子代理后核对 rollout 实际模型是否为 gpt-5.6-luna（issue #32587）"
+# 按标记精确移除托管块；无块则跳过。begin/end 可自定义（TOML 段用 # 注释标记）
+function Remove-ManagedBlock([string]$Path, [string]$Id, [string]$Begin, [string]$End) {
+    if (-not (Test-Path $Path)) { return @{action='skip';dest=$Path;reason='missing'} }
+    $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
+    if (-not $Begin) { $Begin = "<!-- cqs-managed-block:$Id begin -->" }
+    if (-not $End)   { $End   = "<!-- cqs-managed-block:$Id end -->" }
+    if (-not $raw.Contains($Begin)) { return @{action='skip';dest=$Path;reason='block-absent'} }
+    $pattern = "(?ms)\r?\n?" + [regex]::Escape($Begin) + ".*?" + [regex]::Escape($End) + "\r?\n?"
+    $new = [regex]::Replace($raw, $pattern, "`n")
+    Set-Content -Path $Path -Value $new -Encoding UTF8 -NoNewline
+    return @{action='remove-block';dest=$Path;id=$Id}
+}
+
+# [agents] 段追加；已有该段则完全跳过（不备份不覆盖）
+function Merge-AgentsToml([string]$Path, [bool]$DryRun) {
+    $block = @"
+
+# --- codex-quota-saver managed [agents] begin ---
+[agents]
+enabled = true
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "max"
+max_concurrent_threads_per_session = 6
+# --- codex-quota-saver managed [agents] end ---
+"@
+    $existed = Test-Path $Path
+    if ($existed) {
+        $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
+        if ($raw -match '(?m)^\s*\[agents\]') { return @{action='skip';dest=$Path;reason='agents-present';id='agents-toml';created=$false} }
+    }
+    if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
+    $backup = $null
+    if ($existed) {
+        $backup = "$Path.bak-$(Get-Timestamp)"
+        Copy-Item $Path $backup -Force
+    }
+    Add-Content -Path $Path -Value $block -Encoding UTF8
+    return @{action='append';dest=$Path;backup=$backup;id='agents-toml';created=(-not $existed)}
+}
+
+# 复制文件；目标存在时：SkipIfExists 绝不覆盖；OverwriteIfChanged 内容相同则跳过。
+# 所有返回条目都带 sha256（skip 时取当前目标哈希），卸载据此判定「未改动才删」。
+function Install-File([string]$Src, [string]$Dest, [bool]$SkipIfExists, [bool]$OverwriteIfChanged, [bool]$DryRun) {
+    if (Test-Path $Dest) {
+        if ($SkipIfExists) { return @{action='skip';dest=$Dest;reason='exists';sha256=(Get-Sha256 $Dest)} }
+        if ($OverwriteIfChanged -and (Get-Sha256 $Src) -eq (Get-Sha256 $Dest)) {
+            return @{action='skip';dest=$Dest;reason='identical';sha256=(Get-Sha256 $Dest)}
+        }
+    }
+    if ($DryRun) { return @{action='copy';dest=$Dest;dry=$true} }
+    $dir = Split-Path -Parent $Dest
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    $backup = $null
+    if (Test-Path $Dest) {
+        $backup = "$Dest.bak-$(Get-Timestamp)"
+        Copy-Item $Dest $backup -Force
+    }
+    Copy-Item $Src $Dest -Force
+    return @{action='copy';dest=$Dest;src=$Src;backup=$backup;sha256=(Get-Sha256 $Dest)}
+}
+
+function Invoke-Uninstall([string]$CodexHome) {
+    $ManifestPath = Get-ManifestPath $CodexHome
+    $entries = @(Read-Manifest -Path $ManifestPath)
+    if ($entries.Count -eq 0) { Write-Host '无安装记录，无需卸载。'; return }
+    $dirty = $false
+    foreach ($e in $entries) {
+        if ($e.id) {
+            $tBegin = $null; $tEnd = $null
+            if ($e.id -eq 'agents-toml') {
+                $tBegin = '# --- codex-quota-saver managed [agents] begin ---'
+                $tEnd   = '# --- codex-quota-saver managed [agents] end ---'
+            }
+            if ($e.created) {
+                # 该文件由安装创建 → 整删（先确认未混入用户内容：只含托管块则删，否则只摘块）
+                if (Test-Path $e.dest) {
+                    Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
+                    $left = "$(Get-Content $e.dest -Raw -Encoding UTF8)".Trim()
+                    if ([string]::IsNullOrEmpty($left)) { Remove-Item $e.dest -Force; Write-Host "已移除（安装创建）: $($e.dest)" }
+                    else { Write-Host "含用户内容，保留文件（托管块已摘除）: $($e.dest)" }
+                }
+            } else {
+                Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
+                Write-Host "托管块已摘除: $($e.dest)"
+            }
+        }
+        elseif ($e.sha256 -and (Test-Path $e.dest)) {
+            # 卸载只删除自安装后未改动、且非项目数据的文件；.bak 一律留给用户
+            $isDataFile = ($e.dest -match 'next-step\.md$|config\.toml$') -and ($e.dest -match '\\.codex\\')
+            if ($isDataFile) { Write-Host "跳过项目数据文件（保留）: $($e.dest)"; continue }
+            if ((Get-Sha256 $e.dest) -eq $e.sha256) {
+                Remove-Item $e.dest -Force
+                Write-Host "已移除: $($e.dest)"
+            } else {
+                $dirty = $true
+                Write-Host "已改动，跳过（备份仍在）: $($e.dest)"
+            }
+        }
+    }
+    if ($dirty) { Write-Host "部分文件已改动未删除；manifest 保留备查: $ManifestPath" }
+    else { Remove-Item $ManifestPath -Force -ErrorAction SilentlyContinue; Write-Host "已清除安装记录（干净卸载）。" }
+    Write-Host "卸载完成。.bak 备份文件未删除，请自行处理。"
+}
+
+function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun) {
+    if ([string]::IsNullOrEmpty($ProjectPath) -or -not (Test-Path $ProjectPath)) {
+        throw 'ProjectPath 不存在或未提供。'
+    }
+    # 全新环境：先确保 CODEX_HOME 目录存在（dry-run 不落任何文件）
+    if (-not $DryRun) {
+        if (-not (Test-Path $CodexHome)) { New-Item -ItemType Directory -Force $CodexHome | Out-Null }
+        if (-not (Test-Path (Join-Path $CodexHome 'agents'))) { New-Item -ItemType Directory -Force (Join-Path $CodexHome 'agents') | Out-Null }
+    }
+    $globalAgents = Join-Path $CodexHome 'AGENTS.md'
+    $codexConfig  = Join-Path $CodexHome 'config.toml'
+    $workerDest   = Join-Path $CodexHome 'agents\luna-worker.toml'
+    $projectDot   = Join-Path $ProjectPath '.codex'
+
+    $Staged = New-Object System.Collections.ArrayList
+    # 1) 全局 AGENTS：子代理硬规则（托管块）
+    $Staged.Add((Add-ManagedBlock -Path $globalAgents -Id 'global-agents' -Content (Get-Content "$RepoRoot\global\AGENTS.md" -Raw -Encoding UTF8) -DryRun:$DryRun)) | Out-Null
+    # 2) 全局 config.toml：[agents] 段
+    $Staged.Add((Merge-AgentsToml -Path $codexConfig -DryRun:$DryRun)) | Out-Null
+    # 3) 全局 luna-worker 定义
+    $Staged.Add((Install-File -Src "$RepoRoot\global\agents\luna-worker.toml" -Dest $workerDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun)) | Out-Null
+    # 4) 项目级协议 → <project>/AGENTS.md（已存在则跳过，绝不覆盖）
+    $Staged.Add((Install-File -Src "$RepoRoot\project\AGENTS.md" -Dest (Join-Path $ProjectPath 'AGENTS.md') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null
+    # 5) 项目级 .codex 三件（config/next-step 已存在则跳过；skill 按内容更新）
+    $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\config.toml" -Dest (Join-Path $projectDot 'config.toml') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null
+    $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\next-step.md" -Dest (Join-Path $projectDot 'next-step.md') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null
+    $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\skills\luna-routing\SKILL.md" -Dest (Join-Path $projectDot 'skills\luna-routing\SKILL.md') -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun)) | Out-Null
+
+    if ($DryRun) {
+        Write-Host '[dry-run] 将执行：'
+        $Staged | ForEach-Object { Write-Host "  $($_.action) -> $($_.dest) $($_.reason)" }
+        return
+    }
+    Write-Manifest -Path (Get-ManifestPath $CodexHome) -Entries $Staged.ToArray()
+    Write-Host '安装完成。行为：备份不删除、已有项目数据绝不覆盖。详见 manifest:'
+    Write-Host (Get-ManifestPath $CodexHome)
+}
+
+function Invoke-Main {
+    param(
+        [string]$ProjectPath,
+        [string]$CodexHome = "$env:USERPROFILE\.codex",
+        [switch]$DryRun,
+        [switch]$Uninstall
+    )
+    if ($Uninstall) { Invoke-Uninstall -CodexHome $CodexHome; return }
+    Invoke-Install -ProjectPath $ProjectPath -CodexHome $CodexHome -DryRun:([bool]$DryRun)
+}
+
+# 点源（测试）时不要执行 main
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-Main -ProjectPath $ProjectPath -CodexHome $CodexHome -DryRun:([bool]$DryRun) -Uninstall:([bool]$Uninstall)
+}

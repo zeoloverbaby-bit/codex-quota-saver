@@ -1,5 +1,9 @@
 # codex-quota-saver: 子代理默认模型（由 install 脚本追加到 ~/.codex/config.toml 末尾）
-# 网上流传的 [features.multi_agent_v2] 配置键查无实据，不要用；子代理默认模型就是本 [agents] 段。
+# 知识时间戳（verified_at=2026-08-16）：
+# - Observed behavior: 子代理默认模型由本 [agents] 段 default_subagent_model 控制（经 rollout 核对）
+# - Stable contract: 官方 Multi Agents v2（Sol 主 + Luna 舰队）已于 2026-08-15 官宣
+# - Known upstream bug: 该功能地面半成品（#36294/#35097，Luna 被 V2 spawn_agent 当 V1 过滤）
+# - Observed behavior: 网上流传的 [features.multi_agent_v2] 配置键经 2026-08-16 验证查无实据，不要使用
 [agents]
 enabled = true
 default_subagent_model = "gpt-5.6-luna"
