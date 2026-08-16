@@ -10,7 +10,8 @@
 | Ubuntu 24.04 | — | ⚠️ 未实机 | install.sh / setup.sh 仅 `bash -n` 语法验证，首跑请走 `--dry-run` |
 | macOS | — | ⚠️ experimental | 未验证 |
 | Codex | App / CLI（2026-08 实测档） | ✅ 实测 | 见 README 已知问题（#32587 / #36294 / #35097） |
-| ChatGPT 连接器 | OAuth（当前）/ API key（bridge-guard 上线后） | ✅ / 待验证 | bridge-guard 上线时更新本行 |
+| ChatGPT 连接器 | 认证方式只有 OAuth / 无身份验证 / 混合（2026-08-17 实测） | ✅ 实测 | 无 API key 选项 → bridge-guard 自建 OAuth 2.1（授权码 + PKCE + DCR）接入 |
+| mcp SDK（guard） | 2.0.0（pin）+ pyjwt 2.13.0（pin） | ✅ 实测 | 12 个测试含端到端 OAuth 全流程（DCR → 密码页 → PKCE → Bearer 调 MCP） |
 
 ## 已知不兼容 / 注意
 

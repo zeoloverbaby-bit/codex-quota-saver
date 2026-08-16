@@ -6,7 +6,8 @@
 
 ### Security
 - bridge-guard：MCP 桥能力层白名单（只读类工具 + write_next_step），取代 prompt 级约束
-- secrets 硬化：.local.env chmod 600 / Windows ACL；Bearer 走环境变量
+- bridge-guard：自建 OAuth 2.1 授权服务器（授权码 + PKCE + DCR；注册表与签名密钥落盘 = 重启免疫；7 天 JWT）。ChatGPT 连接器实测只有 OAuth/无认证/混合三种认证方式，无 API key 选项——API key 方案因此废弃
+- secrets 硬化：.local.env chmod 600 / Windows ACL；密码与 token 走环境变量
 
 ### Added
 - COMPATIBILITY.md 兼容性矩阵；依赖版本 pin

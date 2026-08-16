@@ -114,12 +114,3 @@ def test_write_next_step_function_fixed_path(tmp_path):
     p = ws / ".codex" / "next-step.md"
     assert p.read_text(encoding="utf-8") == "# hello\nnext"
     assert n > 0
-
-
-def test_token_verifier():
-    async def scenario():
-        v = guard_lib.GuardTokenVerifier("secret")
-        assert await v.verify_token("secret") is not None
-        assert await v.verify_token("wrong") is None
-        assert await v.verify_token("") is None
-    _run(scenario())

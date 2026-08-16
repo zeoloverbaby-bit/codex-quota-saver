@@ -6,7 +6,6 @@
 import os
 
 from mcp.server.lowlevel import Server
-from mcp.server.auth.provider import AccessToken
 from mcp.types import Tool, TextContent, ListToolsResult, CallToolResult
 
 NEXT_STEP_REL = os.path.join(".codex", "next-step.md")
@@ -34,18 +33,6 @@ def write_next_step(workspace: str, content: str) -> int:
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)
     return len(content)
-
-
-class GuardTokenVerifier:
-    """Bearer 校验：token 匹配才放行（返回 AccessToken 即有效）。"""
-
-    def __init__(self, token: str):
-        self._token = token
-
-    async def verify_token(self, token: str):
-        if token and token == self._token:
-            return AccessToken(token=token, client_id="bridge-guard", scopes=[])
-        return None
 
 
 def make_guard(upstream_session, allowlist: set, workspace: str) -> Server:

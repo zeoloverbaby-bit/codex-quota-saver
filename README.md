@@ -163,7 +163,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
 
-- [x] 安全边界硬化：MCP 桥能力层白名单（bridge-guard）已发布
+- [x] 安全边界硬化：MCP 桥能力层白名单 + 自建 OAuth 认证（bridge-guard）已发布
 - [x] CI 三平台绿（installer / eval / 静态检查 / gitleaks / link check）
 - [x] installer 幂等 / dry-run / uninstall / rollback 测试通过
 - [ ] A/B 评测数据产出（协议见 eval/，n 小不宣称统计显著）

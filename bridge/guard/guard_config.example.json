@@ -1,11 +1,14 @@
 // bridge/guard/guard_config.example.json —— 示例配置，无密钥；真实值由 bridge/setup.* 生成并 gitignore
+// 认证：guard 自建 OAuth 2.1 授权服务器（ChatGPT 连接器选 OAuth 认证，授权页输一次密码）
 {
   "host": "127.0.0.1",
   "port": 8766,
   "workspace": "D:/path/to/your/repo",
   "upstream_url": "http://127.0.0.1:8765/mcp",
-  "token_env": "CQS_GUARD_TOKEN",
+  "public_url": "https://your-static-domain.ngrok-free.dev",
   "upstream_token_env": "CQS_UPSTREAM_TOKEN",
+  "oauth_password_env": "CQS_OAUTH_PASSWORD",
+  "oauth_state_file": "oauth_state.json",
   "allowlist": [
     "server_info",
     "read_file",
