@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-08-17
+
+### Fixed
+- bridge-guard `/mcp` 端点被 SDK 默认的 DNS-rebinding 防护误拦：guard 以 `host=127.0.0.1` 启动时，SDK 自动只放行本机回环 Host——经 ngrok 转发的请求（Host=公网域名）全部 421「Invalid Host header」。现场表现：ChatGPT 连接器 OAuth 授权成功（`/token` 200）后连接 MCP 失败、工具列表为空、UI 报「建立连接时发生意外错误」。修复：新增 `build_transport_security(public_url)` 显式放行公网域名（含带端口形式）+ 本机回环，其余陌生 Host 仍被拒绝
+- 新增回归测试：公网 Host 下完整 OAuth + MCP 流程（不修复则 /mcp 421 失败）；transport security 放行/拒绝矩阵单测（公网域名、带端口、回环放行；陌生 Host 421；POST 非 JSON 400）
+
 ## [1.6.2] - 2026-08-17
 
 ### Fixed
