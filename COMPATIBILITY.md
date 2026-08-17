@@ -7,7 +7,8 @@
 | coding-tools-mcp | 0.3.0（2026-08-13 发布） | ✅ 实测 | 脚本已 pin；上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` env（0.3.0 官方支持，不进 argv）；升级需重验 OAuth/bearer 参数 |
 | ngrok | 3.39.11 | ✅ 实测（Windows） | winget 安装不在 PATH，脚本已处理 |
 | Windows 11 + PowerShell 5.1 | — | ✅ 实测 | install.ps1 / bridge/setup.ps1 全路径实测；.ps1 必须 UTF-8 BOM |
-| Ubuntu 24.04 | — | ⚠️ 未实机 | install.sh / setup.sh 仅 `bash -n` 语法验证，首跑请走 `--dry-run` |
+| Ubuntu 24.04 / install.sh | — | ✅ CI 实机 | GitHub-hosted Ubuntu runner 真实执行：ShellCheck + pytest + bats（install.sh 幂等/冲突/回滚用例）；非独立物理机实测 |
+| Ubuntu 24.04 / bridge setup.sh | — | ⚠️ 未实机 | 仅 ShellCheck 语法验证；未完成真实 bridge deployment 实测 |
 | macOS | — | ⚠️ experimental | 未验证 |
 | Codex | App / CLI（2026-08 实测档） | ✅ 实测 | 见 README 已知问题（#32587 / #36294 / #35097） |
 | ChatGPT 连接器 | 认证方式只有 OAuth / 无身份验证 / 混合（2026-08-17 实测） | ✅ 实测 | 无 API key 选项 → bridge-guard 自建 OAuth 2.1（授权码 + PKCE + DCR）接入 |

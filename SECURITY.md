@@ -10,6 +10,7 @@ MCP 桥的安全边界是 **prompt 约束 + OAuth 认证**，不是能力约束�
 ## v1.6.0 硬化后（bridge-guard）
 
 - 能力层白名单：只读类工具（read/search/git 读）+ `write_next_step`（服务端硬编码仅可写 `.codex/next-step.md`）；exec/apply_patch 在协议层不存在。分类口径（repository_read / git_read / handoff / diagnostics / forbidden）见 [bridge/README.md](bridge/README.md)「Capability Taxonomy」
+- `write_next_step` 物理边界（v1.6.6+）：`.codex` / `next-step.md` 为符号链接时 fail-closed 拒绝（绝不 follow）、realpath 边界包含检查兜底 Windows junction、同目录临时文件 + fsync + `os.replace` 原子写；安全拒绝经 MCP 层返回 `isError=true` 工具结果（v1.6.7+，不再冒到协议层 JSON-RPC error），会话保持可用
 - 身份层：guard 自建 OAuth 2.1 授权服务器（授权码 + PKCE + DCR）。背景：ChatGPT 连接器实测只有 OAuth / 无身份验证 / 混合三种认证方式，无 API key 选项；「无身份验证」不可取（ngrok 域名公开可达，等于把工作区只读权限白送任何人）
 - secrets：`.local.env` chmod 600（POSIX）/ icacls 当前用户（Windows）；OAuth 密码经环境变量注入 guard；上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不再经 `--auth-token` 进入进程 argv）；guard → 上游走 HTTP Bearer 头
 - 残余风险（如实声明）：上游 token 持久化存储仅位于 owner-restricted secrets 文件；启动上游时 token 存在于本机子进程环境块（对同权限/高权限本机进程可见）；upstream 仅绑定 127.0.0.1，该风险属于本机同权限/高权限进程威胁模型

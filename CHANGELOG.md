@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 语义化版本。历史条目从仓库 commit 重建。
 
+## [Unreleased]
+
+### Security
+- installer 跨版本升级语义（S1→S2）：mutation branch 不再按当前文件系统存在性重推断 ownership（CQS 创建的文件升级后仍 created_by_cqs，绝不铸造假 origin 备份）；backup 角色分离——origin（首份用户内容快照，进 manifest，卸载恢复用）与 txn（本轮覆盖前快照，绝不进 manifest，成功消费/失败恢复），升级中途失败恢复 S1、manifest 原样、重试不楔死
+- installer 托管块版本升级：managed block / [agents] 托管区记录 installed_block_hash——块体未被修改且模板升级 → 同事务内替换升级；被用户改过 → 保留 + 明确报告；旧版本安装无 hash → 保守 warn + skip（fail-safe）
+- installer [agents] reconciliation ownership-aware：markers = ownership boundary——CQS 托管键可随新版本升级（threads 6→4 等），用户键四态规则不变、ownership 永不被抢；托管区被改 / 内外同名 key → CONFLICT fail-fast（任何落盘前终止）；补丁不再产生嵌套双 markers
+- installer concurrency 下界：max_concurrent_threads_per_session 按官方 schema minimum=1 校验（0/-1 拒装，1≤cur<desired 才 adopt_stricter）；desired 自身非法 → 安装拒绝启动（drift guard）
+- guard write_next_step 安全拒绝经 MCP 层返回 `isError=true`（不再冒成协议层 JSON-RPC error），同会话后续只读工具保持可用
+- 测试 seam：CQS_TEST_SOURCE_ROOT（staged S1/S2/S3 source 树），跨版本升级回归矩阵（USER/missing → S1→S2→S3 → 卸载 / 升级失败恢复）Pester + bats 双平台镜像
+
 ## [1.6.6] - 2026-08-17
 
 ### Security
