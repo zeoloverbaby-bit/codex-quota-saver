@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-08-17
+
+### Added
+- 启动器预热：启动桥约 15 秒后自动打开默认浏览器到桥密码页（`https://<域名>/auth/login`）。ngrok 免费版拦截页无法用技术手段跳过（官方禁止注入 skip 头），必须浏览器手动点一次「Visit Site」（cookie 持久）——预热把「用到时才发现要点」提前到「启动时顺手点掉」，点过之后每次启动直接见密码页（兼作桥存活体检页）。Windows 用隐藏 PowerShell 延迟打开（不阻塞 ngrok 前台）；macOS/Linux 用 `xdg-open`（回退 `open`）后台打开
+- 新增回归测试：launcher 模板含预热行断言（Pester 断言 setup.ps1 + setup.sh 源码）
+
 ## [1.6.3] - 2026-08-17
 
 ### Fixed

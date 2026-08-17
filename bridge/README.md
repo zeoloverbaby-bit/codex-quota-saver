@@ -35,6 +35,8 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 日常使用：双击 / 运行 `start-bridge.local.*`；**不开发时关闭**（隧道 = 项目后门）。
 
+启动约 15 秒后会自动打开浏览器到桥密码页（预热 ngrok 拦截页）：新浏览器首次会看到英文警告页，**点一次「Visit Site」**（cookie 持久，之后不再出现）；点过之后每次启动直接见密码页，可当作「桥活着」的体检页。
+
 前置：ngrok 已注册 authtoken 并在控制台绑定静态域名（脚本会检查并提示）；工作区路径必须真实存在。
 
 ## 冒烟三连

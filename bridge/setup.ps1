@@ -118,6 +118,8 @@ $batContent = "@echo off`r`n" +
     "REM NOTE: start needs a non-empty title; an empty title swallows commands with quoted args`r`n" +
     "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort --auth-token %CQS_UPSTREAM_TOKEN%`r`n" +
     "start `"guard`" /min `"$guardPyWin`" `"$guardScriptWin`" --config `"$guardConfWin`"`r`n" +
+    "REM warmup: ngrok free interstitial needs one manual browser click (persistent cookie); auto-open login page 15s after start`r`n" +
+    "start `"`" powershell -NoProfile -WindowStyle Hidden -Command `"Start-Sleep -Seconds 15; Start-Process 'https://$Domain/auth/login'`"`r`n" +
     "`"$ngrokExe`" http --url=$Domain $GuardPort`r`n" +
     "pause`r`n"
 [System.IO.File]::WriteAllText($Launcher, $batContent, (New-Object System.Text.ASCIIEncoding))
