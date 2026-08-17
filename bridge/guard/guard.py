@@ -99,6 +99,19 @@ async def main() -> None:
     host = cfg.get("host", "127.0.0.1")
     port = int(cfg.get("port", 8766))
 
+    # 环境变量缺失立即失败并给明确原因（2026-08-17 现场：启动器 env 加载被非 ASCII 注释破坏，
+    # 这里曾 KeyError → 重试 10×3s 后静默退出，窗口消失无从排查）
+    missing_env = [
+        k for k in (cfg["upstream_token_env"], cfg["oauth_password_env"]) if k not in os.environ
+    ]
+    if missing_env:
+        print(
+            f"[bridge-guard] FATAL 缺少环境变量: {missing_env} —— "
+            "请确认启动器已正确加载 .secrets.local.env",
+            flush=True,
+        )
+        raise SystemExit(1)
+
     # 上游可能比 guard 晚就绪（启动器并行拉起）——首次连接失败必须重试
     for attempt in range(1, 11):
         try:

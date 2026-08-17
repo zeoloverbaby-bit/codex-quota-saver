@@ -14,6 +14,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $BridgeDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $BridgeDir 'acl.ps1')   # Tighten-Acl：secrets 默认 (R,W)；launcher 需 (RX,W)——双击执行缺 X 会报「无法访问」
+. (Join-Path $BridgeDir 'secrets.ps1')   # New-Token / New-Password（防越界 NUL 版）
 $EnvFile = Join-Path $BridgeDir '.secrets.local.env'
 $GuardConf = Join-Path $BridgeDir 'guard\guard_config.json'
 $OAuthState = Join-Path $BridgeDir 'guard\oauth_state.json'
@@ -26,26 +27,6 @@ $Allowlist = @(
     'git_status','git_diff','git_log','git_show','git_blame','view_image'
 )
 
-function New-Token {
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $buf = New-Object byte[] 32
-    $rng.GetBytes($buf)
-    return (-join ($buf | ForEach-Object { $_.ToString('x2') }))
-}
-function New-Password {
-    param([int]$Length = 16)
-    # 59 字符字母表（去易混 0O1lI）；拒绝采样保证均匀（4*59=236 <= 255）
-    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $chars = New-Object System.Collections.Generic.List[char]
-    while ($chars.Count -lt $Length) {
-        $b = New-Object byte[] 1
-        $rng.GetBytes($b)
-        if ($b[0] -ge 236) { continue }
-        $chars.Add($alphabet[$b[0] % 59])
-    }
-    return (-join $chars)
-}
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -96,7 +77,8 @@ $GuardPy = Join-Path $GuardVenv 'Scripts\python.exe'
 # 3) 密钥（只写 .local.env，ACL 收紧）
 $upTok = New-Token
 if (-not $OAuthPassword) { $OAuthPassword = New-Password }
-Write-Utf8NoBom $EnvFile "# codex-quota-saver bridge secrets (gitignored, ACL-restricted) — DO NOT COMMIT`r`nCQS_OAUTH_PASSWORD=$OAuthPassword`r`nCQS_UPSTREAM_TOKEN=$upTok`r`n"
+# env 文件必须纯 ASCII：非 ASCII 字节会破坏 cmd for /f 在 GBK 系统的文件读取（2026-08-17 实测 em-dash 注释导致变量全部加载失败）
+Write-Utf8NoBom $EnvFile "# codex-quota-saver bridge secrets (gitignored, ACL-restricted) - DO NOT COMMIT`r`nCQS_OAUTH_PASSWORD=$OAuthPassword`r`nCQS_UPSTREAM_TOKEN=$upTok`r`n"
 Tighten-Acl $EnvFile
 
 # 4) guard 配置（无密钥；密码/token 经环境变量注入）
@@ -125,7 +107,14 @@ $guardConfWin = $GuardConf.Replace('\', '\')
 # 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
 $batContent = "@echo off`r`n" +
     "REM codex-quota-saver bridge launcher (generated, gitignored)`r`n" +
-    "for /f `"usebackq tokens=1,* delims==`" %%a in (`"$EnvFile`") do set %%a=%%b`r`n" +
+    "netstat -ano | findstr `":$GuardPort `" | findstr LISTENING >nul 2>&1`r`n" +
+    "if not errorlevel 1 (`r`n" +
+    "  echo Bridge is already running - port $GuardPort in use. Do NOT start it twice.`r`n" +
+    "  echo To restart: close all three windows first, then run this file again.`r`n" +
+    "  pause`r`n" +
+    "  exit /b 1`r`n" +
+    ")`r`n" +
+    "for /f `"usebackq eol=# tokens=1,* delims==`" %%a in (`"$EnvFile`") do set `"%%a=%%b`"`r`n" +
     "REM NOTE: start needs a non-empty title; an empty title swallows commands with quoted args`r`n" +
     "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort --auth-token %CQS_UPSTREAM_TOKEN%`r`n" +
     "start `"guard`" /min `"$guardPyWin`" `"$guardScriptWin`" --config `"$guardConfWin`"`r`n" +
