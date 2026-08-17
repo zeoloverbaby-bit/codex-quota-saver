@@ -20,6 +20,21 @@ ChatGPT 连接器 → ngrok → bridge-guard（OAuth 认证 + 白名单 + write_
 - secrets 落 `.secrets.local.env`（POSIX chmod 600 / Windows icacls 当前用户），已 gitignore
 - 残余风险（如实声明）：guard 挡的是能力面；仓库内容本身仍是模型输入，prompt injection 的理论残余风险见 [SECURITY.md](../SECURITY.md)
 
+## Capability Taxonomy（认知权限 vs 行动权限）
+
+> 原则：Least Privilege = 完成角色职责所需的**最小充分权限**。Planner / Reviewer 需要广读仓库与 Git Evidence（认知），行动权限必须极窄——**Read broadly, act narrowly**。限制的是行动能力，不是认知能力。
+
+| Bundle | 工具 | 语义 |
+|---|---|---|
+| `repository_read` | server_info, read_file, list_dir, list_files, search_text, view_image | 仓库内容 / 结构 / 元数据认知 |
+| `git_read` | git_status（branch / HEAD / upstream / ahead-behind）、git_diff（执行结果审查）、git_log、git_show（commit evidence）、git_blame（根因定位） | Git Evidence 读取——Planner/Reviewer 闭环的最小充分证据集 |
+| `handoff` | write_next_step（guard 自实现） | 唯一 mutation：固定 `.codex/next-step.md` |
+| `diagnostics`（**不放行**） | check_exec_environment, read_output, request_permissions | 名字像 read，实为 Execution Runtime State / mutation 通道——Planner 无 exec 能力，无认知价值 |
+| `forbidden`（协议层不存在） | apply_patch, exec_command, write_stdin, kill_command | mutation / 任意 shell / 进程控制 |
+
+- 分类锚定 coding-tools-mcp 0.3.0 工具目录（18 个）；上游升级先重验契约测试（tests/test_guard.py），再改 setup 的 allowlist
+- 已知窄认知缺口（**绝不为此开放 exec_command**）：任意两 refs 间 diff（如 `main...HEAD`）、merge-base、branch/tag refs 枚举——未来候选 guard 自实现只读工具 `git_compare` / `git_refs` / `git_merge_base`（固定 git 子命令、无 shell、workspace-bound），本轮记录不实现
+
 ## 部署
 
 ```powershell

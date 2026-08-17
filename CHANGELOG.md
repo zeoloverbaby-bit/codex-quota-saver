@@ -4,14 +4,26 @@
 
 ## [Unreleased]
 
+### Security
+- installer ownership hardening（P0）：manifest 记录文件所有权（ownership / created_by_cqs / modified_by_cqs / installed_hash / managed_block_id）——修复「用户原有文件被 skip 后，卸载因 hash 没变而误删」的数据所有权缺陷（实测命中 `<project>/AGENTS.md`）；双平台语义一致，旧格式 manifest 条目保守不删（fail-safe）
+- OAuth state 权限边界：状态文件移入 `bridge/guard/state/`（Windows 目录 ACL 收紧到当前用户、POSIX 目录 0700 / 文件 600）；setup 重跑自动迁移旧 `oauth_state.json`（授权不失效，无需重新授权）
+- 上游 token 不再经 `--auth-token` 进入进程 argv：启动器改用 `CODING_TOOLS_MCP_AUTH_TOKEN` 环境变量（coding-tools-mcp 0.3.0 官方支持）；移除「进程命令行不可见」的虚假安全声明，如实记录残余风险（token 存在于本机进程环境块，对同权限/高权限本机进程可见；upstream 仅绑定 127.0.0.1）
+- Capability Taxonomy 文档化（bridge/README）：Planner 最小充分认知权限 = repository_read + git_read + handoff（唯一 mutation = write_next_step）；diagnostics / mutation 类工具协议层不存在；本轮验证 Git Read 集合已完整（git_status 含 branch/HEAD/upstream/ahead-behind），窄缺口（两 refs 间 diff / merge-base / refs 枚举）记录为未来候选只读工具，绝不开放 exec_command
+
 ### Added
 - docs/pitfalls.md：新增坑 16-19（桥加固期：NUL env 窗口消失 / ACL 执行位 / 421 DNS-rebinding / ngrok 拦截页）；排坑表 15 → 19 坑，README 计数同步
+- 回归测试：installer ownership 全场景（Pester + bats：用户文件保留 / 合并摘块 / 创建删除 / 恢复原备份 / 用户修改保护 / legacy 保守）；OAuth state ACL（Pester 目录继承行为 + setup 源码断言；pytest POSIX 权限位）；launcher env token 模板断言；guard 工具契约测试（锚定 0.3.0 目录，防上游漂移）
 
 ### Changed
 - README：部署第 3 步与「已知问题」清单补充 ngrok 免费版拦截页说明（无法技术跳过、点一次 Visit Site、v1.6.4 起启动器自动预热）
 - README：Status 行同步稳定 Gate 进度（五道已过四道，仅剩 A/B 评测数据产出）
 - README：第 3 步措辞 v1.6.x 化（「捕获连接器参数」→「自动注册连接器（DCR，无需捕获任何参数）」）
 - docs/pitfalls.md：坑 4/10/11 标注 v1.6.0 已根治（oauth_state.json 落盘）；自救清单密码位置改为 `.secrets.local.env`
+- installer：项目级协议改为 managed block 合并（`project-protocol`）——已有 `AGENTS.md` 追加、不存在创建、重复安装幂等、卸载只摘块；协议文本 source of truth 仍是 `project/AGENTS.md`
+- installer：卸载真 rollback——CQS 覆盖过的文件在未改动时恢复原备份（消费 .bak）；用户安装后修改的文件一律保留并提示人工处理
+- Tighten-Acl 目录分支：ACE 补 (OI)(CI) 继承标志 + Delete（否则子文件拿创建 token 默认 DACL、且 owner 无法删除 state 文件重新授权）
+- README：CI 平台口径改为 Windows + Ubuntu（ci.yml 无 macOS runner，不再称「三平台」）；坑表/测试数量等易漂移数字从稳定文档与 GitHub repo description 移除；SECURITY v1.5.0 边界段标题历史化
+- web-gpt prompt 工具权限节修正：write_next_step 是唯一写工具（apply_patch 协议层不存在），补充 git 工具用途（git_diff 审查执行结果 / git_show 验证 commit evidence）
 
 ### Removed
 - bridge/start-bridge.bat / bridge/start-bridge.sh：v1.1-1.5 时代旧模板（手工填占位符 + 上游直连 `--oauth-mode`）。已被 setup 生成的 `start-bridge.local.*` 完全取代且全仓库零引用——删除以保持「启动器唯一权威来源 = setup」
