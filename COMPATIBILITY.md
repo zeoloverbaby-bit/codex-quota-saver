@@ -4,7 +4,7 @@
 
 | 项 | 版本 / 环境 | 状态 | 备注 |
 |---|---|---|---|
-| coding-tools-mcp | 0.3.0（2026-08-13 发布） | ✅ 实测 | 脚本已 pin；升级需重验 OAuth/bearer 参数 |
+| coding-tools-mcp | 0.3.0（2026-08-13 发布） | ✅ 实测 | 脚本已 pin；上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` env（0.3.0 官方支持，不进 argv）；升级需重验 OAuth/bearer 参数 |
 | ngrok | 3.39.11 | ✅ 实测（Windows） | winget 安装不在 PATH，脚本已处理 |
 | Windows 11 + PowerShell 5.1 | — | ✅ 实测 | install.ps1 / bridge/setup.ps1 全路径实测；.ps1 必须 UTF-8 BOM |
 | Ubuntu 24.04 | — | ⚠️ 未实机 | install.sh / setup.sh 仅 `bash -n` 语法验证，首跑请走 `--dry-run` |

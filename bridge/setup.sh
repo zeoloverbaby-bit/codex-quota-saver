@@ -2,7 +2,8 @@
 # bridge/setup.sh —— 双进程部署（macOS / Linux）
 # 用法: ./bridge/setup.sh <ngrok域名> <workspace> [<oauth密码>] [--dry-run]
 # 认证：guard 自建 OAuth 2.1（ChatGPT 连接器只有 OAuth/无认证/混合，API key 不可行）。
-# 安全：umask 077 全程；secrets 落 .secrets.local.env（600 + gitignore）；密码/token 经环境变量注入。
+# 安全：umask 077 全程；secrets 落 .secrets.local.env（600 + gitignore）；密码经环境变量注入 guard；
+#       上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不进 argv）。
 set -euo pipefail
 umask 077
 
@@ -103,7 +104,8 @@ fi
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # codex-quota-saver bridge launcher (generated, gitignored)
-# 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
+# 上游不开 OAuth、不对外（认证全在 guard 层）；token 经 CODING_TOOLS_MCP_AUTH_TOKEN
+# 环境变量传递（0.3.0 官方支持，不经命令行参数/argv）
 set -euo pipefail
 # 二重启动防护：guard 端口已被监听说明桥已在运行（避免端口/域名冲突的困惑报错）
 if netstat -an 2>/dev/null | grep -qE "(\.|:)$GUARD_PORT .*LISTEN"; then
@@ -112,7 +114,8 @@ if netstat -an 2>/dev/null | grep -qE "(\.|:)$GUARD_PORT .*LISTEN"; then
   exit 1
 fi
 source "$ENV_FILE"
-"\$(command -v coding-tools-mcp)" --workspace "$WORKSPACE" --host 127.0.0.1 --port $UPSTREAM_PORT --auth-token "\$CQS_UPSTREAM_TOKEN" &
+export CODING_TOOLS_MCP_AUTH_TOKEN="\$CQS_UPSTREAM_TOKEN"
+"\$(command -v coding-tools-mcp)" --workspace "$WORKSPACE" --host 127.0.0.1 --port $UPSTREAM_PORT &
 UP_PID=\$!
 "$BRIDGE_DIR/guard/.venv/bin/python" "$BRIDGE_DIR/guard/guard.py" --config "$GUARD_CONF" &
 GUARD_PID=\$!

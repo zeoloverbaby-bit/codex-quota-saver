@@ -65,6 +65,12 @@ if defined CQS_UPSTREAM_TOKEN (echo TOKEN_OK>"{1}") else (echo TOKEN_MISSING>"{1
         $shSource -match 'xdg-open "https://\$DOMAIN/auth/login"' | Should -BeTrue
         $shSource -match 'sleep 15' | Should -BeTrue
     }
+    It '上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递，不进入 --auth-token/argv（0.3.0 官方支持）' {
+        $setupSource -match 'CODING_TOOLS_MCP_AUTH_TOKEN=%CQS_UPSTREAM_TOKEN%' | Should -BeTrue
+        $setupSource -match '--auth-token' | Should -BeFalse
+        $shSource -match 'export CODING_TOOLS_MCP_AUTH_TOKEN=' | Should -BeTrue
+        $shSource -match '--auth-token' | Should -BeFalse
+    }
     It '二重启动防护功能：端口占用时提示 already running 并退出（块内 echo 无括号——括号会提前终结 if 块，2026-08-17 实测根因）' {
         $job = Start-Job -ScriptBlock {
             $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 18876)

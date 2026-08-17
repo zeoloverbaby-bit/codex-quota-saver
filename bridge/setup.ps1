@@ -2,7 +2,8 @@
 # bridge/setup.ps1 —— 双进程部署：coding-tools-mcp(内部) + bridge-guard(对外)（本文件必须 UTF-8 带 BOM）
 # 用法: .\bridge\setup.ps1 -Domain <ngrok域名> -Workspace <项目路径> [-OAuthPassword <密码>] [-DryRun]
 # 认证：guard 自建 OAuth 2.1（ChatGPT 连接器只有 OAuth/无认证/混合三种认证，API key 不可行）。
-# 安全：secrets 只落 .secrets.local.env（ACL 收紧到当前用户 + gitignore）；密码/token 经环境变量注入，进程命令行不可见。
+# 安全：secrets 只落 .secrets.local.env（ACL 收紧到当前用户 + gitignore）；密码经环境变量注入 guard；
+#       上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不进 argv）。
 param(
     [Parameter(Mandatory=$true)][string]$Domain,
     [Parameter(Mandatory=$true)][string]$Workspace,
@@ -116,7 +117,7 @@ if (Test-Path $OAuthState) {
 $guardPyWin = $GuardPy.Replace('\', '\')
 $guardScriptWin = (Join-Path $BridgeDir 'guard\guard.py').Replace('\', '\')
 $guardConfWin = $GuardConf.Replace('\', '\')
-# 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
+# 上游不开 OAuth、不对外（认证全在 guard 层）；token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（0.3.0 官方支持，不进 argv）
 $batContent = "@echo off`r`n" +
     "REM codex-quota-saver bridge launcher (generated, gitignored)`r`n" +
     "netstat -ano | findstr `":$GuardPort `" | findstr LISTENING >nul 2>&1`r`n" +
@@ -127,8 +128,10 @@ $batContent = "@echo off`r`n" +
     "  exit /b 1`r`n" +
     ")`r`n" +
     "for /f `"usebackq eol=# tokens=1,* delims==`" %%a in (`"$EnvFile`") do set `"%%a=%%b`"`r`n" +
+    "set `"CODING_TOOLS_MCP_AUTH_TOKEN=%CQS_UPSTREAM_TOKEN%`"`r`n" +
+    "REM upstream reads CODING_TOOLS_MCP_AUTH_TOKEN env var (0.3.0 official support) - token never enters argv`r`n" +
     "REM NOTE: start needs a non-empty title; an empty title swallows commands with quoted args`r`n" +
-    "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort --auth-token %CQS_UPSTREAM_TOKEN%`r`n" +
+    "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort`r`n" +
     "start `"guard`" /min `"$guardPyWin`" `"$guardScriptWin`" --config `"$guardConfWin`"`r`n" +
     "REM warmup: ngrok free interstitial needs one manual browser click (persistent cookie); auto-open login page 15s after start`r`n" +
     "start `"`" powershell -NoProfile -WindowStyle Hidden -Command `"Start-Sleep -Seconds 15; Start-Process 'https://$Domain/auth/login'`"`r`n" +
