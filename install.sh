@@ -179,7 +179,8 @@ fi
 add_managed_block "$CODEX_HOME/AGENTS.md" "global-agents" "$REPO_ROOT/global/AGENTS.md"
 merge_agents_toml  "$CODEX_HOME/config.toml"
 install_file "$REPO_ROOT/global/agents/luna-worker.toml" "$CODEX_HOME/agents/luna-worker.toml" 0 1
-install_file "$REPO_ROOT/project/AGENTS.md" "$PROJECT_PATH/AGENTS.md" 1 0
+# 项目级协议：托管块合并（已存在追加、不存在创建）；协议文本 source of truth = project/AGENTS.md
+add_managed_block "$PROJECT_PATH/AGENTS.md" "project-protocol" "$REPO_ROOT/project/AGENTS.md"
 install_file "$REPO_ROOT/project/dot-codex/config.toml" "$PROJECT_PATH/.codex/config.toml" 1 0
 install_file "$REPO_ROOT/project/dot-codex/next-step.md" "$PROJECT_PATH/.codex/next-step.md" 1 0
 install_file "$REPO_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1

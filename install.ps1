@@ -219,8 +219,9 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
     $Staged.Add((Merge-AgentsToml -Path $codexConfig -DryRun:$DryRun)) | Out-Null
     # 3) 全局 luna-worker 定义
     $Staged.Add((Install-File -Src "$RepoRoot\global\agents\luna-worker.toml" -Dest $workerDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun)) | Out-Null
-    # 4) 项目级协议 → <project>/AGENTS.md（已存在则跳过，绝不覆盖）
-    $Staged.Add((Install-File -Src "$RepoRoot\project\AGENTS.md" -Dest (Join-Path $ProjectPath 'AGENTS.md') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null
+    # 4) 项目级协议 → <project>/AGENTS.md（托管块合并：已存在追加、不存在创建；
+    #    协议文本 source of truth = project/AGENTS.md，installer 内不复制第二份）
+    $Staged.Add((Add-ManagedBlock -Path (Join-Path $ProjectPath 'AGENTS.md') -Id 'project-protocol' -Content (Get-Content "$RepoRoot\project\AGENTS.md" -Raw -Encoding UTF8) -DryRun:$DryRun)) | Out-Null
     # 5) 项目级 .codex 三件（config/next-step 已存在则跳过；skill 按内容更新）
     $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\config.toml" -Dest (Join-Path $projectDot 'config.toml') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null
     $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\next-step.md" -Dest (Join-Path $projectDot 'next-step.md') -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun)) | Out-Null

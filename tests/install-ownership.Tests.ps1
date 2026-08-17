@@ -41,7 +41,7 @@ Describe 'Install-File ownership 字段' {
 }
 
 Describe 'Invoke-Uninstall ownership 规则' {
-    It '用户原有文件（skip）install→uninstall 后必须原样保留（P0 回归）' {
+    It '用户原有 project/AGENTS.md install→uninstall 后必须原样保留（P0 回归）' {
         $proj = New-Item -ItemType Directory "$TestDrive/proj"
         $agents = Join-Path $proj.FullName 'AGENTS.md'
         Set-Content $agents -Value 'USER CONTENT' -Encoding UTF8
@@ -67,5 +67,40 @@ Describe 'Invoke-Uninstall ownership 规则' {
         Invoke-Uninstall -CodexHome "$TestDrive/codex3"
         (Test-Path $f.FullName) | Should -BeTrue
         (Get-Content $f.FullName -Raw -Encoding UTF8).Trim() | Should -Be 'LEGACY'
+    }
+}
+
+Describe '项目级协议 managed block merge（三层协议必须装进已有 AGENTS.md）' {
+    It '用户已有 project/AGENTS.md：install 追加托管块（Case 1），uninstall 摘块且文件保留' {
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-merge"
+        $agents = Join-Path $proj.FullName 'AGENTS.md'
+        Set-Content $agents -Value 'USER CONTENT' -Encoding UTF8
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome "$TestDrive/codex-merge"
+        $raw = Get-Content $agents -Raw -Encoding UTF8
+        $raw -match 'USER CONTENT' | Should -BeTrue
+        $raw -match 'cqs-managed-block:project-protocol' | Should -BeTrue
+        $raw -match '三层协作协议' | Should -BeTrue
+        Invoke-Main -Uninstall -CodexHome "$TestDrive/codex-merge"
+        (Test-Path $agents) | Should -BeTrue
+        (Get-Content $agents -Raw -Encoding UTF8).Trim() | Should -Be 'USER CONTENT'
+    }
+    It '重复安装幂等：协议块不重复插入' {
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-merge2"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome "$TestDrive/codex-merge2"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome "$TestDrive/codex-merge2"
+        $raw = Get-Content (Join-Path $proj.FullName 'AGENTS.md') -Raw -Encoding UTF8
+        ([regex]::Matches($raw, 'cqs-managed-block:project-protocol begin')).Count | Should -Be 1
+    }
+    It 'CQS 创建后用户加内容：uninstall 摘块保留用户新增（Case 4）' {
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-add"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome "$TestDrive/codex-add"
+        $agents = Join-Path $proj.FullName 'AGENTS.md'
+        Add-Content -Path $agents -Value 'USER NEW CONTENT' -Encoding UTF8
+        Invoke-Main -Uninstall -CodexHome "$TestDrive/codex-add"
+        (Test-Path $agents) | Should -BeTrue
+        $raw = Get-Content $agents -Raw -Encoding UTF8
+        $raw -match 'cqs-managed-block' | Should -BeFalse
+        $raw -match '三层协作协议' | Should -BeFalse
+        $raw -match 'USER NEW CONTENT' | Should -BeTrue
     }
 }

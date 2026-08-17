@@ -70,3 +70,23 @@ teardown() { rm -rf "$TESTDIR"; }
   [ -f "$TESTDIR/legacy.md" ]
   [ "$(cat "$TESTDIR/legacy.md")" = "LEGACY" ]
 }
+
+@test "用户已有 project/AGENTS.md：安装追加协议块，卸载摘块保留用户内容" {
+  printf 'USER CONTENT\n' > "$CQS_TEST_PROJECT/AGENTS.md"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'cqs-managed-block:project-protocol' "$CQS_TEST_PROJECT/AGENTS.md"
+  grep -q 'USER CONTENT' "$CQS_TEST_PROJECT/AGENTS.md"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ -f "$CQS_TEST_PROJECT/AGENTS.md" ]
+  [ "$(cat "$CQS_TEST_PROJECT/AGENTS.md")" = "USER CONTENT" ]
+}
+
+@test "CQS 创建后用户加内容：卸载只摘协议块保留新增内容" {
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  printf '\nUSER NEW CONTENT\n' >> "$CQS_TEST_PROJECT/AGENTS.md"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ -f "$CQS_TEST_PROJECT/AGENTS.md" ]
+  ! grep -q 'cqs-managed-block' "$CQS_TEST_PROJECT/AGENTS.md"
+  ! grep -q '三层协作协议' "$CQS_TEST_PROJECT/AGENTS.md"
+  grep -q 'USER NEW CONTENT' "$CQS_TEST_PROJECT/AGENTS.md"
+}
