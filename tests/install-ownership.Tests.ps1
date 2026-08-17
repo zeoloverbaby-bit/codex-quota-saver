@@ -603,6 +603,52 @@ Describe 'agents reconciliation ownership-aware 升级（CQS region vs user keys
         { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
         (Get-Content $cfg -Raw -Encoding UTF8) | Should -Be $cfgBefore
     }
+
+    It 'threads=0（user key）：安装不能成功（conflict fail-fast、零 mutation）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-z"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $codex = Join-Path $TestDrive 'codex-ag-zero'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nmax_concurrent_threads_per_session = 0" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-zero')
+        $cfgBefore = Get-Content $cfg -Raw -Encoding UTF8
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s1
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+        }
+        (Get-Content $cfg -Raw -Encoding UTF8) | Should -Be $cfgBefore
+        (Test-Path (Get-ManifestPath $codex)) | Should -BeFalse
+    }
+
+    It 'threads=1（user key）：更严且合法 → adopt_stricter、安装成功' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-one"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $codex = Join-Path $TestDrive 'codex-ag-one'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nmax_concurrent_threads_per_session = 1" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-one')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        "$(Get-Content $cfg -Raw -Encoding UTF8)" | Should -Match 'max_concurrent_threads_per_session = 1'
+        "$(Get-Content $cfg -Raw -Encoding UTF8)" | Should -Not -Match 'max_concurrent_threads_per_session = 6'
+    }
+
+    It 'desired 自身非法（threads=0 的 source of truth）→ 安装拒绝启动（drift guard）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-drift"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        Set-DesiredThreads $s1 '0'
+        $codex = Join-Path $TestDrive 'codex-ag-drift'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-drift')
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s1
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'partial failure：中途失败不丢旧 manifest、已改资源回滚、绝不打印成功' {

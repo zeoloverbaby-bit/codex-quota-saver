@@ -279,6 +279,7 @@ agents_classify() { # $1=key $2=desiredRaw $3=currentRaw(空=missing) → add|ad
     max_concurrent_threads_per_session)
       case "$c" in *[!0-9]*|"") echo "manual"; return ;; esac
       ci="$c"; di="$d"
+      if [ "$ci" -lt 1 ]; then echo "conflict"; return; fi   # 官方 schema minimum=1（0 是启动错误）
       if [ "$ci" -eq "$di" ]; then echo "adopt"; return; fi
       if [ "$ci" -lt "$di" ]; then echo "adopt_stricter"; return; fi   # 更严上限满足 ≤desired 不变量
       echo "conflict"
@@ -300,6 +301,13 @@ agents_key_impact() {
 agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析/托管区被改/重复 key → exit 1
   local f="$1" k d c st conflicts=0 desired="" prev="" pblockhash="" regionkeys="" outside="" key
   local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
+  # 期望值自身校验（drift guard）：无论 config.toml 是否存在都校验 source of truth（官方 schema minimum=1）
+  local tv=""
+  tv="$(agents_span "$SOURCE_ROOT/global/config-agents.toml" \
+    | grep -E '^[[:space:]]*max_concurrent_threads_per_session[[:space:]]*=' | head -n 1 \
+    | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+  case "$tv" in ''|*[!0-9]*) log "global/config-agents.toml 期望 max_concurrent_threads_per_session 非法（必须 ≥ 1 的整数）: [$tv]"; exit 1 ;; esac
+  if [ "$tv" -lt 1 ]; then log "global/config-agents.toml 期望 max_concurrent_threads_per_session 非法（必须 ≥ 1 的整数）: [$tv]"; exit 1; fi
   [ -f "$f" ] || return 0
   grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$f" || return 0
   prev="$(prev_line "$f")"

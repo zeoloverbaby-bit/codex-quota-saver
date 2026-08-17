@@ -187,6 +187,11 @@ function Get-AgentsDesiredState {
         if (-not $found.ContainsKey($k)) { throw "global/config-agents.toml 缺少期望 key [$k]（source of truth 损坏）" }
         $desired[$k] = @{ raw = $found[$k]; type = $policy[$k] }
     }
+    # 期望值自身校验（drift guard）：官方 schema minimum=1（codex-rs schemars(range(min=1)) + 运行时验证拒绝 0）
+    $threadsRaw = $desired['max_concurrent_threads_per_session'].raw
+    if ($threadsRaw -notmatch '^\d+$' -or [int]$threadsRaw -lt 1) {
+        throw "global/config-agents.toml 期望 max_concurrent_threads_per_session 非法（必须 ≥ 1）: $threadsRaw"
+    }
     return $desired
 }
 
@@ -276,6 +281,7 @@ function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired, [string]$Pre
                 $desiredInt = [int]$d.raw
                 $curInt = [int]$cur
                 if ($curInt -eq $desiredInt) { $plan.states[$k] = 'adopt' }
+                elseif ($curInt -lt 1) { $plan.states[$k] = 'conflict' }   # 官方 schema minimum=1（0 是启动错误、-1 非法）
                 elseif ($curInt -lt $desiredInt) { $plan.states[$k] = 'adopt_stricter' }
                 else { $plan.states[$k] = 'conflict' }
             } else {
@@ -319,7 +325,7 @@ function Get-AgentsKeyImpact([string]$Key) {
         'enabled' { return 'CQS 依赖多代理协作（Luna worker 子代理），enabled=false 会让 [agents] 失效' }
         'default_subagent_model' { return 'CQS 无法保证 Luna 默认子代理路由（期望 gpt-5.6-luna）' }
         'default_subagent_reasoning_effort' { return 'CQS 交接质量依赖 max 推理档' }
-        'max_concurrent_threads_per_session' { return '超过 CQS 配额上限 6，破坏额度节省不变量' }
+        'max_concurrent_threads_per_session' { return '线程上限必须满足 1 ≤ 值 ≤ CQS 期望上限 6（官方 schema minimum=1；超出破坏额度节省不变量）' }
         default { return 'CQS 配置契约冲突' }
     }
 }

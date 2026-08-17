@@ -376,6 +376,33 @@ stage_sources() { # $1=dir
   cmp -s "$TESTDIR/cfg.before" "$CQS_TEST_CODEX_HOME/config.toml"
 }
 
+@test "threads=0（user key）：安装不能成功（conflict fail-fast、零 mutation）" {
+  stage_sources "$TESTDIR/src"
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nmax_concurrent_threads_per_session = 0\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  cp "$CQS_TEST_CODEX_HOME/config.toml" "$TESTDIR/cfg.before"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/cfg.before" "$CQS_TEST_CODEX_HOME/config.toml"
+  [ ! -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" ]
+}
+
+@test "threads=1（user key）：更严且合法 → adopt_stricter、安装成功" {
+  stage_sources "$TESTDIR/src"
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nmax_concurrent_threads_per_session = 1\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'max_concurrent_threads_per_session = 1' "$CQS_TEST_CODEX_HOME/config.toml"
+  ! grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
+@test "desired 自身非法（threads=0）→ 安装拒绝启动（drift guard）" {
+  stage_sources "$TESTDIR/src"
+  sed -i 's/max_concurrent_threads_per_session = 6/max_concurrent_threads_per_session = 0/' "$TESTDIR/src/s1/global/config-agents.toml"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+}
+
 @test "Managed Block Case G：用户内容 + 块 S1 → 模板升级 S2 → 块升级、卸载只剩用户内容" {
   stage_sources "$TESTDIR/src"
   printf 'LUNA PROTOCOL V1\n' > "$TESTDIR/src/s1/global/AGENTS.md"
