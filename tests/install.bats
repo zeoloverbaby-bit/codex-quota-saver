@@ -334,6 +334,48 @@ stage_sources() { # $1=dir
   [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
 }
 
+@test "agents Case I：CQS-owned key threads=6 → S2 desired 4 → 升级、用户 key 不动" {
+  stage_sources "$TESTDIR/src"
+  sed -i 's/max_concurrent_threads_per_session = 6/max_concurrent_threads_per_session = 4/' "$TESTDIR/src/s2/global/config-agents.toml"
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'max_concurrent_threads_per_session = 4' "$CQS_TEST_CODEX_HOME/config.toml"
+  ! grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^enabled' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  [ "$(grep -c '^max_concurrent_threads_per_session' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  [ "$(grep -c 'codex-quota-saver managed \[agents\] begin' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep 'config.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'installed_block_hash='
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(grep -v '^[[:space:]]*$' "$CQS_TEST_CODEX_HOME/config.toml")" = $'[agents]\nenabled = true' ]
+}
+
+@test "agents Case J：user-owned threads=6 → S2 desired 4 → CONFLICT fail-fast、零 mutation" {
+  stage_sources "$TESTDIR/src"
+  sed -i 's/max_concurrent_threads_per_session = 6/max_concurrent_threads_per_session = 4/' "$TESTDIR/src/s2/global/config-agents.toml"
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nmax_concurrent_threads_per_session = 6\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cp "$CQS_TEST_CODEX_HOME/config.toml" "$TESTDIR/cfg.before"
+  cp "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" "$TESTDIR/manifest.before"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/cfg.before" "$CQS_TEST_CODEX_HOME/config.toml"
+  cmp -s "$TESTDIR/manifest.before" "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest"
+}
+
+@test "agents duplicate key：region 内 + region 外同名 → CONFLICT fail-fast" {
+  stage_sources "$TESTDIR/src"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  printf '\nmax_concurrent_threads_per_session = 6\n' >> "$CQS_TEST_CODEX_HOME/config.toml"
+  cp "$CQS_TEST_CODEX_HOME/config.toml" "$TESTDIR/cfg.before"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/cfg.before" "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
 @test "Managed Block Case G：用户内容 + 块 S1 → 模板升级 S2 → 块升级、卸载只剩用户内容" {
   stage_sources "$TESTDIR/src"
   printf 'LUNA PROTOCOL V1\n' > "$TESTDIR/src/s1/global/AGENTS.md"

@@ -190,50 +190,125 @@ function Get-AgentsDesiredState {
     return $desired
 }
 
-function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired) {
-    # 返回: table_exists / header_index / states(key→add|adopt|adopt_stricter|conflict) /
-    #       current(key→原始值) / writer_supported（span 内出现无法可靠解析的行 = false）
-    $plan = @{ table_exists = $false; header_index = -1; states = @{}; current = @{}; writer_supported = $true }
-    $lines = $raw -split "`r?`n"
+function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired, [string]$PrevInstalledBlockHash) {
+    # 返回: table_exists / header_index / states(key→add|adopt|adopt_stricter|conflict|region) /
+    #       current(region 外用户 key→原始值) / writer_supported / nl /
+    #       markers_exist / region_hash / region_upgrade / region_unverified / region_modified / duplicates
+    # CQS-owned = markers 之间的 region（installed_block_hash 判定：未改→可升级，改了→conflict）；
+    # region 外同名 key = duplicate → conflict。期望 region keys = desired 中不在 region 外的 key。
+    $plan = @{ table_exists = $false; header_index = -1; states = @{}; current = @{}
+               writer_supported = $true; markers_exist = $false; region_hash = $null
+               region_upgrade = $false; region_unverified = $false; region_modified = $false; duplicates = @() }
+    $begin = '# --- codex-quota-saver managed [agents] begin ---'
+    $end   = '# --- codex-quota-saver managed [agents] end ---'
+    $plan.nl = "`r`n"; if (-not $Raw.Contains("`r`n")) { $plan.nl = "`n" }
+    $lines = $Raw -split "`r?`n"
+    # 先定位 markers：整文件形状里 [agents] 表头位于托管区内，不能当作外层表头
+    $beginIdx = -1; $endIdx = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -eq $begin -and $beginIdx -lt 0) { $beginIdx = $i }
+        elseif ($beginIdx -ge 0 -and $lines[$i].Trim() -eq $end -and $endIdx -lt 0) { $endIdx = $i }
+    }
+    # begin 标记可能位于表头之前（整文件形状）→ 扫描起点之前就要记录 markers 存在
+    if ($beginIdx -ge 0) { $plan.markers_exist = $true }
+    # 外层表头 = 托管区外的第一个 [agents] 行；没有则回退到托管区内的表头（整文件形状）
+    $headerIdx = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s*\[agents\]\s*(#.*)?$') {
-            $plan.table_exists = $true
-            $plan.header_index = $i
-            $spanEnd = $lines.Count
-            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
-                if ($lines[$j] -match '^\s*\[') { $spanEnd = $j; break }
-            }
-            for ($j = $i + 1; $j -lt $spanEnd; $j++) {
-                $ln = $lines[$j]
-                if ($ln -match '^\s*(#.*)?$') { continue }
-                if ($ln -match '^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$') {
-                    $plan.current[$Matches[1]] = $Matches[2].Trim()
+            $insideRegion = ($beginIdx -ge 0 -and $i -gt $beginIdx -and ($endIdx -lt 0 -or $i -lt $endIdx))
+            if (-not $insideRegion) { $headerIdx = $i; break }
+        }
+    }
+    if ($headerIdx -lt 0) {
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*\[agents\]\s*(#.*)?$') { $headerIdx = $i; break }
+        }
+    }
+    if ($headerIdx -ge 0) {
+        $plan.table_exists = $true
+        $plan.header_index = $headerIdx
+        $spanEnd = $lines.Count
+        for ($j = $headerIdx + 1; $j -lt $lines.Count; $j++) {
+            if ($lines[$j] -match '^\s*\[') { $spanEnd = $j; break }
+        }
+        # 整文件形状：begin marker 在表头之前 → 扫描起点即处于托管区内
+        $inside = ($beginIdx -ge 0 -and $beginIdx -lt $headerIdx)
+        $regionKeys = @{}
+        for ($j = $headerIdx + 1; $j -lt $spanEnd; $j++) {
+            $ln = $lines[$j]
+            if ($ln.Trim() -eq $begin) { $plan.markers_exist = $true; $inside = $true; continue }
+            if ($inside -and $ln.Trim() -eq $end) { $inside = $false; continue }
+            if ($ln -match '^\s*(#.*)?$') { continue }
+            if ($ln -match '^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$') {
+                $key = $Matches[1]
+                if ($inside) {
+                    if ($regionKeys.ContainsKey($key) -or $plan.current.ContainsKey($key)) {
+                        if ($plan.duplicates -notcontains $key) { $plan.duplicates += $key }
+                    }
+                    $regionKeys[$key] = $Matches[2].Trim()
                 } else {
-                    $plan.writer_supported = $false   # 多行值等无法可靠定位 → fail-safe 人工
+                    if ($regionKeys.ContainsKey($key)) {
+                        if ($plan.duplicates -notcontains $key) { $plan.duplicates += $key }
+                    }
+                    $plan.current[$key] = $Matches[2].Trim()
                 }
+            } else {
+                if (-not $inside) { $plan.writer_supported = $false }   # 多行值等无法可靠定位 → fail-safe 人工
             }
-            break
+        }
+        if ($plan.markers_exist) {
+            $body = Get-ManagedBlockBody $Raw $begin $end
+            if ($null -eq $body) { $plan.writer_supported = $false } else { $plan.region_hash = Get-StringSha256 $body }
         }
     }
     foreach ($k in $Desired.Keys) {
         $d = $Desired[$k]
-        if (-not $plan.current.ContainsKey($k)) { $plan.states[$k] = 'add'; continue }
-        $cur = $plan.current[$k]
-        switch ($d.type) {
-            'bool' { if ($cur -notin @('true','false')) { $plan.writer_supported = $false } }
-            'int'  { if ($cur -notmatch '^\d+$') { $plan.writer_supported = $false } }
-        }
-        if (-not $plan.writer_supported) { $plan.states[$k] = 'conflict'; continue }
-        $curNorm = $cur.Trim('"')
-        if ($d.type -eq 'int') {
-            $desiredInt = [int]$d.raw
-            $curInt = [int]$cur
-            if ($curInt -eq $desiredInt) { $plan.states[$k] = 'adopt' }
-            elseif ($curInt -lt $desiredInt) { $plan.states[$k] = 'adopt_stricter' }
-            else { $plan.states[$k] = 'conflict' }
+        if ($plan.current.ContainsKey($k)) {
+            # region 外用户 key：现有四态规则
+            $cur = $plan.current[$k]
+            switch ($d.type) {
+                'bool' { if ($cur -notin @('true','false')) { $plan.writer_supported = $false } }
+                'int'  { if ($cur -notmatch '^\d+$') { $plan.writer_supported = $false } }
+            }
+            if (-not $plan.writer_supported) { $plan.states[$k] = 'conflict'; continue }
+            $curNorm = $cur.Trim('"')
+            if ($d.type -eq 'int') {
+                $desiredInt = [int]$d.raw
+                $curInt = [int]$cur
+                if ($curInt -eq $desiredInt) { $plan.states[$k] = 'adopt' }
+                elseif ($curInt -lt $desiredInt) { $plan.states[$k] = 'adopt_stricter' }
+                else { $plan.states[$k] = 'conflict' }
+            } else {
+                if ($curNorm -eq $d.raw.Trim('"')) { $plan.states[$k] = 'adopt' }
+                else { $plan.states[$k] = 'conflict' }
+            }
+        } elseif ($plan.markers_exist) {
+            # key 位于 CQS region：region 未改时由 region 升级逻辑统一处理
+            $plan.states[$k] = 'region'
         } else {
-            if ($curNorm -eq $d.raw.Trim('"')) { $plan.states[$k] = 'adopt' }
-            else { $plan.states[$k] = 'conflict' }
+            $plan.states[$k] = 'add'
+        }
+    }
+    # region 决策：markers 存在且 span 可解析时按 installed_block_hash 区分
+    if ($plan.markers_exist -and $plan.writer_supported) {
+        if ([string]::IsNullOrEmpty($PrevInstalledBlockHash)) {
+            $plan.region_unverified = $true
+        } elseif ($plan.region_hash -ne $PrevInstalledBlockHash) {
+            $plan.region_modified = $true
+        } else {
+            $regionKeysDesired = @($Desired.Keys | Where-Object { -not $plan.current.ContainsKey($_) })
+            $bodyRaw = Get-ManagedBlockBody $Raw $begin $end
+            $whole = ($null -ne $bodyRaw -and $bodyRaw.TrimStart().StartsWith('[agents]'))
+            $nl = $plan.nl
+            $newHash = $null
+            if ($whole) {
+                $keysText = (($regionKeysDesired | ForEach-Object { "$_ = $($Desired[$_].raw)" }) -join "`n")
+                $newHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin`n[agents]`n$keysText`n$end`n" $begin $end)
+            } else {
+                $regionText = (($regionKeysDesired | ForEach-Object { "$_ = $($Desired[$_].raw)" }) -join $nl)
+                $newHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+            }
+            if ($null -eq $newHash -or $newHash -ne $plan.region_hash) { $plan.region_upgrade = $true }
         }
     }
     return $plan
@@ -277,24 +352,38 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
     $begin = '# --- codex-quota-saver managed [agents] begin ---'
     $end   = '# --- codex-quota-saver managed [agents] end ---'
     $desired = Get-AgentsDesiredState
+    $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
+    $prevHash = $null
+    if ($null -ne $Prev -and $Prev.installed_block_hash) { $prevHash = [string]$Prev.installed_block_hash }
     $existed = Test-Path $Path
     if (-not $existed) {
         # 文件不存在：整块创建（CQS 拥有整个表）
         if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
-        Add-Content -Path $Path -Value (New-AgentsManagedBlock $desired) -Encoding UTF8
-        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$null;managed_block_id='agents-toml';ownership='cqs';created_by_cqs=$true;modified_by_cqs=$false;created_this_run=$true;backup_created_this_run=$false})
+        $block = New-AgentsManagedBlock $desired
+        Add-Content -Path $Path -Value $block -Encoding UTF8
+        $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$null;managed_block_id='agents-toml';ownership='cqs';created_by_cqs=$true;modified_by_cqs=$false;installed_block_hash=$regionHash;created_this_run=$true;backup_created_this_run=$false})
     }
     $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
-    $plan = Get-AgentsReconcilePlan -Raw $raw -Desired $desired
+    $plan = Get-AgentsReconcilePlan -Raw $raw -Desired $desired -PrevInstalledBlockHash $prevHash
     if (-not $plan.table_exists) {
         # 文件存在但无 [agents] 表：整块 append（用户文件 → 备份 + user ownership）
         if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
-        $backup = $null
-        $backupCreatedThisRun = $false
-        if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
-        else { $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true }
-        Add-Content -Path $Path -Value (New-AgentsManagedBlock $desired) -Encoding UTF8
-        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun})
+        $backup = $null; $backupCreatedThisRun = $false; $txnBackup = $null
+        if ($prevCreated) {
+            $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+        } elseif ($null -ne $Prev -and $Prev.backup) {
+            $backup = $Prev.backup
+            $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+        } else {
+            $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true
+        }
+        $block = New-AgentsManagedBlock $desired
+        Add-Content -Path $Path -Value $block -Encoding UTF8
+        $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+        $ownership = 'cqs'; $created = $true; $modified = $false
+        if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
     }
     $conflictKeys = @($plan.states.GetEnumerator() | Where-Object { $_.Value -eq 'conflict' })
     if ($DryRun) {
@@ -304,16 +393,23 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
             if ($st -eq 'add') { Write-Host "  ADD              $k = $($desired[$k].raw)" }
             elseif ($st -eq 'adopt') { Write-Host "  ADOPT            $k（已一致，不修改）" }
             elseif ($st -eq 'adopt_stricter') { Write-Host "  ADOPT_STRICTER   $k = $($plan.current[$k])（保留用户更严值）" }
+            elseif ($st -eq 'region') { Write-Host "  REGION           $k（CQS 托管键）" }
             elseif ($st -eq 'conflict') { Write-Host "  CONFLICT         $k（当前 $($plan.current[$k])，CQS 期望 $($desired[$k].raw)）" }
         }
+        if ($plan.region_upgrade) { Write-Host '  UPGRADE_REGION   托管键区将升级为新期望值' }
         return @{action='skip';dest=$Path;dry=$true;reason='agents-reconcile-plan'}
     }
     if (-not $plan.writer_supported) {
         Write-Host "config.toml [agents] 段含无法可靠解析的内容，跳过自动修改（fail-safe），请人工处理: $Path"
         return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-manual';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
     }
-    if ($conflictKeys.Count -gt 0) {
+    if ($plan.duplicates.Count -gt 0) {
+        Write-Host "config.toml [agents] 重复 key（region 内外同名，TOML 非法）: $($plan.duplicates -join ', ')"
+        throw "[agents] duplicate key——安装已在任何修改前终止；请人工处理后重试"
+    }
+    if ($conflictKeys.Count -gt 0 -or $plan.region_modified) {
         Write-Host "config.toml [agents] 冲突（fail-fast）："
+        if ($plan.region_modified) { Write-Host '  CQS managed [agents] 托管区已被手动修改，不覆盖（请人工处理该区域）' }
         Write-AgentsConflictReport $plan $desired
         throw "[agents] config conflict——安装终止；请调整 config.toml 后重试"
     }
@@ -322,12 +418,56 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
             Write-Host "已采纳用户更严值 [agents].$k = $($plan.current[$k])（满足 CQS 不变量，不覆盖）"
         }
     }
+    if ($plan.region_upgrade) {
+        # 托管区未修改且 desired 变了 → 摘旧 region 写新 region（同一 txn 内；backup 身份只保留 origin）
+        $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+        Remove-ManagedBlock -Path $Path -Id 'agents-toml' -Begin $begin -End $end | Out-Null
+        $raw2 = "$(Get-Content $Path -Raw -Encoding UTF8)"
+        $regionKeysDesired = @($desired.Keys | Where-Object { -not $plan.current.ContainsKey($_) })
+        $backup = $null
+        if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
+        $ownership = 'cqs'; $created = $true; $modified = $false
+        if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+        $regionHash = $null
+        if ($raw2 -match '(?m)^\s*\[agents\]\s*(#.*)?$') {
+            # keys-only 形状（表头在 region 外）：表头后插 markers + 新 region keys
+            $nl = $plan.nl
+            $lines2 = $raw2 -split "`r?`n"
+            $newLines = New-Object System.Collections.ArrayList
+            for ($i = 0; $i -lt $lines2.Count; $i++) {
+                [void]$newLines.Add($lines2[$i])
+                if ($lines2[$i] -match '^\s*\[agents\]\s*(#.*)?$') {
+                    [void]$newLines.Add($begin)
+                    foreach ($k in $regionKeysDesired) { [void]$newLines.Add("$k = $($desired[$k].raw)") }
+                    [void]$newLines.Add($end)
+                }
+            }
+            Set-Content -Path $Path -Value ($newLines -join $nl) -Encoding UTF8
+            $regionText = (($regionKeysDesired | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join $nl)
+            $regionHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+        } else {
+            # 整文件形状（region 内含 [agents] 表头）：整块重建（LF，与 New-AgentsManagedBlock 一致）
+            $keysText = (($regionKeysDesired | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join "`n")
+            $block = "`n$begin`n[agents]`n$keysText`n$end`n"
+            Add-Content -Path $Path -Value $block -Encoding UTF8
+            $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+        }
+        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$false;txn_backup_this_run=$txnBackup})
+    }
+    if ($plan.markers_exist) {
+        if ($plan.region_unverified) {
+            Write-Host "config.toml [agents] 托管区存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $Path"
+            return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-unverified';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
+        }
+        # region 未改、desired 未变 → 幂等 adopt（含 hash 沿用）
+        return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-adopted';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
+    }
     $addKeys = @($desired.Keys | Where-Object { $plan.states[$_] -eq 'add' })
     if ($addKeys.Count -eq 0) {
         return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-adopted';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
     }
-    # 文本补丁：表头后插 markers + 缺失 keys（绝不整文件序列化；保留换行风格）
-    $nl = "`r`n"; if (-not $raw.Contains("`r`n")) { $nl = "`n" }
+    # 文本补丁：表头后插 markers + 缺失 keys（markers 不存在才走到这里；绝不整文件序列化；保留换行风格）
+    $nl = $plan.nl
     $lines = $raw -split "`r?`n"
     $newLines = New-Object System.Collections.ArrayList
     for ($i = 0; $i -le $plan.header_index; $i++) { [void]$newLines.Add($lines[$i]) }
@@ -335,23 +475,36 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
     foreach ($k in $desired.Keys) { if ($plan.states[$k] -eq 'add') { [void]$newLines.Add("$k = $($desired[$k].raw)") } }
     [void]$newLines.Add($end)
     for ($i = $plan.header_index + 1; $i -lt $lines.Count; $i++) { [void]$newLines.Add($lines[$i]) }
-    $backup = $null
-    $backupCreatedThisRun = $false
-    if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
-    else { $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true }
+    $backup = $null; $backupCreatedThisRun = $false; $txnBackup = $null
+    if ($prevCreated) {
+        $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+    } elseif ($null -ne $Prev -and $Prev.backup) {
+        $backup = $Prev.backup
+        $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+    } else {
+        $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true
+    }
     Set-Content -Path $Path -Value ($newLines -join $nl) -Encoding UTF8
-    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun})
+    $regionText = (($addKeys | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join $nl)
+    $regionHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+    $ownership = 'cqs'; $created = $true; $modified = $false
+    if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
 }
 
-function Assert-AgentsPreflight([string]$ConfigPath) {
-    # 任何 filesystem mutation 之前：config.toml [agents] 冲突/无法解析 → fail-fast 终止
+function Assert-AgentsPreflight([string]$ConfigPath, $Prev) {
+    # 任何 filesystem mutation 之前：config.toml [agents] 冲突/无法解析/托管区被改 → fail-fast 终止
     if (-not (Test-Path $ConfigPath)) { return }
     $desired = Get-AgentsDesiredState
-    $plan = Get-AgentsReconcilePlan -Raw "$(Get-Content $ConfigPath -Raw -Encoding UTF8)" -Desired $desired
+    $prevHash = $null
+    if ($null -ne $Prev -and $Prev.installed_block_hash) { $prevHash = [string]$Prev.installed_block_hash }
+    $plan = Get-AgentsReconcilePlan -Raw "$(Get-Content $ConfigPath -Raw -Encoding UTF8)" -Desired $desired -PrevInstalledBlockHash $prevHash
     if (-not $plan.table_exists) { return }
     $conflictKeys = @($plan.states.GetEnumerator() | Where-Object { $_.Value -eq 'conflict' })
-    if (-not $plan.writer_supported -or $conflictKeys.Count -gt 0) {
+    if (-not $plan.writer_supported -or $conflictKeys.Count -gt 0 -or $plan.region_modified -or $plan.duplicates.Count -gt 0) {
         Write-Host "config.toml [agents] 冲突（fail-fast，任何修改前终止）："
+        if ($plan.region_modified) { Write-Host '  CQS managed [agents] 托管区已被手动修改（请人工处理该区域）' }
+        if ($plan.duplicates.Count -gt 0) { Write-Host "  重复 key（region 内外同名，TOML 非法）: $($plan.duplicates -join ', ')" }
         Write-AgentsConflictReport $plan $desired
         throw "[agents] config conflict——安装已在任何修改前终止；请调整 config.toml 后重试"
     }
@@ -481,14 +634,8 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
     if ([string]::IsNullOrEmpty($ProjectPath) -or -not (Test-Path $ProjectPath)) {
         throw 'ProjectPath 不存在或未提供。'
     }
-    # preflight（任何 filesystem mutation 之前）：config.toml [agents] 冲突 → fail-fast
-    if (-not $DryRun) { Assert-AgentsPreflight (Join-Path $CodexHome 'config.toml') }
-    # 全新环境：先确保 CODEX_HOME 目录存在（dry-run 不落任何文件）
-    if (-not $DryRun) {
-        if (-not (Test-Path $CodexHome)) { New-Item -ItemType Directory -Force $CodexHome | Out-Null }
-        if (-not (Test-Path (Join-Path $CodexHome 'agents'))) { New-Item -ItemType Directory -Force (Join-Path $CodexHome 'agents') | Out-Null }
-    }
-    # 生命周期幂等：先读旧 manifest（persistent provenance ledger），本轮 observation 与之合并
+    # 生命周期幂等：先读旧 manifest（persistent provenance ledger），本轮 observation 与之合并；
+    # preflight 需要 agents-toml 条目的 installed_block_hash（region 是否被改的判定依据）
     $manifestPath = Get-ManifestPath $CodexHome
     $prevByDest = @{}
     if (-not $DryRun) {
@@ -498,6 +645,13 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
     }
     $globalAgents = Join-Path $CodexHome 'AGENTS.md'
     $codexConfig  = Join-Path $CodexHome 'config.toml'
+    # preflight（任何 filesystem mutation 之前）：config.toml [agents] 冲突 → fail-fast
+    if (-not $DryRun) { Assert-AgentsPreflight $codexConfig $prevByDest[$codexConfig] }
+    # 全新环境：先确保 CODEX_HOME 目录存在（dry-run 不落任何文件）
+    if (-not $DryRun) {
+        if (-not (Test-Path $CodexHome)) { New-Item -ItemType Directory -Force $CodexHome | Out-Null }
+        if (-not (Test-Path (Join-Path $CodexHome 'agents'))) { New-Item -ItemType Directory -Force (Join-Path $CodexHome 'agents') | Out-Null }
+    }
     $workerDest   = Join-Path $CodexHome 'agents\luna-worker.toml'
     $projectDot   = Join-Path $ProjectPath '.codex'
 

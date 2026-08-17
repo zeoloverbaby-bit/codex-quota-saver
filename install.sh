@@ -239,6 +239,31 @@ agents_span_value() { # $1=file $2=key → [agents] span 内该 key 的原始值
     | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*#[^"]*$//' | sed 's/[[:space:]]*$//'
 }
 
+agents_region_keys() { # $1=file $2=begin $3=end → CQS 托管区（markers 之间）的 key 名，TAB 分隔
+  awk -v b="$2" -v e="$3" '!seen && index($0,b)>0 { seen=1; next } seen && index($0,e)>0 { exit } seen { print }' "$1" \
+    | sed -n 's/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=.*$/\1/p' | tr '\n' '\t'
+}
+
+agents_span_keys() { # $1=file → [agents] span 全部 key 名（含托管区），TAB 分隔
+  agents_span "$1" | sed -n 's/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=.*$/\1/p' | tr '\n' '\t'
+}
+
+in_word_list() { # $1=word $2=TAB 分隔列表 → 命中 0 / 未命中 1
+  local w="$1" list="$2"
+  [ -n "$w" ] || return 1
+  case "$list" in *"$w"*) return 0 ;; *) return 1 ;; esac
+}
+
+count_in() { # $1=word $2=空白分隔列表 → 出现次数
+  local w="$1" n=0 key
+  for key in $2; do [ "$key" = "$w" ] && n=$((n+1)); done
+  echo "$n"
+}
+
+agents_region_hash_of() { # $1=region-text → 与 block_body_hash 同口径（awk 行重建：末行补 \n）
+  printf '%s' "$1" | awk '{print}' | sha256sum | cut -d' ' -f1
+}
+
 agents_classify() { # $1=key $2=desiredRaw $3=currentRaw(空=missing) → add|adopt|adopt_stricter|conflict|manual
   local k="$1" d="$2" c="$3" dnorm cnorm ci di
   if [ -z "$c" ]; then echo "add"; return; fi
@@ -272,13 +297,37 @@ agents_key_impact() {
   esac
 }
 
-agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析 → exit 1
-  local f="$1" k d c st conflicts=0 desired=""
+agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析/托管区被改/重复 key → exit 1
+  local f="$1" k d c st conflicts=0 desired="" prev="" pblockhash="" regionkeys="" outside="" key
+  local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
   [ -f "$f" ] || return 0
   grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$f" || return 0
+  prev="$(prev_line "$f")"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
+  if grep -qF "$begin" "$f"; then
+    regionkeys="$(agents_region_keys "$f" "$begin" "$end" || true)"
+    local spankeys=""
+    spankeys="$(agents_span_keys "$f" || true)"
+    # outside = span 中出现次数多于托管区内出现次数的 key（即 region 外存在同名 key）
+    for key in $spankeys; do
+      [ "$(count_in "$key" "$spankeys")" -gt "$(count_in "$key" "$regionkeys")" ] && { in_word_list "$key" "$outside" || outside="$outside$key	"; }
+    done
+    if [ -n "$pblockhash" ] && [ "$(block_body_hash "$f" "$begin" "$end")" != "$pblockhash" ]; then
+      log "Conflict: CQS managed [agents] 托管区已被手动修改（请人工处理该区域）"
+      conflicts=1
+    fi
+  fi
   desired="$(agents_desired || true)"
   while IFS=$'\t' read -r k d; do
     [ -n "$k" ] || continue
+    if [ -n "$regionkeys" ] && in_word_list "$k" "$regionkeys"; then
+      # 托管区内 key：完整性由 hash 判定；内外同名 → duplicate（TOML 非法）
+      if in_word_list "$k" "$outside"; then
+        conflicts=1
+        log "Conflict: [agents].$k 重复出现（托管区内外同名，TOML 非法）"
+      fi
+      continue
+    fi
     c="$(agents_span_value "$f" "$k" || true)"
     st="$(agents_classify "$k" "$d" "$c")"
     case "$st" in
@@ -299,11 +348,12 @@ EOF
   fi
 }
 
-merge_agents_toml() { # $1=file —— key 级 reconciliation
-  local prev="" pcreated="" pbackup=""
+merge_agents_toml() { # $1=file —— key 级 reconciliation + CQS 托管区升级（markers = ownership boundary）
+  local prev="" pcreated="" pbackup="" pblockhash=""
   prev="$(prev_line "$1")"
   [ -z "$prev" ] || pcreated="$(manifest_field "$prev" created_by_cqs)"
   [ -z "$prev" ] || pbackup="$(manifest_field "$prev" backup)"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
   local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
   # 无 [agents] 表（文件不存在或表不存在）：整块 append（CQS 拥有整个表）
   if [ ! -f "$1" ] || ! grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
@@ -324,23 +374,105 @@ merge_agents_toml() { # $1=file —— key 级 reconciliation
     else
       track_created "$1"
     fi
-    {
-      printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
-      local desired=""
-      desired="$(agents_desired || true)"
-      while IFS=$'\t' read -r k d; do
-        [ -n "$k" ] || continue
-        printf '%s = %s\n' "$k" "$d"
-      done <<EOF
+    local blocktext="[agents]" desired=""
+    desired="$(agents_desired || true)"
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      blocktext="$blocktext
+$k = $d"
+    done <<EOF
 $desired
 EOF
-      printf '%s\n' "$end"
+    {
+      printf '\n'; printf '%s\n' "$begin"; printf '%s\n' "$blocktext"; printf '%s\n' "$end"
     } >> "$1"
-    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$(agents_region_hash_of "$blocktext")" "backup=$backup"
     log "append [agents]: $1"
     return
   fi
-  # 表存在：逐 key 分类（reconcile plan）
+  # markers 存在：CQS 托管区完整性（installed_block_hash）+ 升级决策
+  if grep -qF "$begin" "$1"; then
+    local regionkeys="" outside="" key k d desired="" regionhash="" newregiontext="" newregionhash="" conflicts=0 spankeys=""
+    regionkeys="$(agents_region_keys "$1" "$begin" "$end" || true)"
+    spankeys="$(agents_span_keys "$1" || true)"
+    # outside = span 中出现次数多于托管区内出现次数的 key（即 region 外存在同名 key）
+    for key in $spankeys; do
+      [ "$(count_in "$key" "$spankeys")" -gt "$(count_in "$key" "$regionkeys")" ] && { in_word_list "$key" "$outside" || outside="$outside$key	"; }
+    done
+    if [ -z "$pblockhash" ]; then
+      log "config.toml [agents] 托管区存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $1"
+      manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "backup=$pbackup"
+      return
+    fi
+    regionhash="$(block_body_hash "$1" "$begin" "$end")"
+    if [ "$regionhash" != "$pblockhash" ]; then
+      log "config.toml [agents] 冲突（fail-fast）："
+      log "  CQS managed [agents] 托管区已被手动修改（请人工处理该区域）"
+      exit 1
+    fi
+    desired="$(agents_desired || true)"
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      if in_word_list "$k" "$regionkeys" && in_word_list "$k" "$outside"; then
+        conflicts=1
+        log "Conflict: [agents].$k 重复出现（托管区内外同名，TOML 非法）"
+      fi
+    done <<EOF
+$desired
+EOF
+    if [ "$conflicts" = "1" ]; then
+      log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast）。"
+      exit 1
+    fi
+    # 新 desired region = desired keys 不在 region 外（user keys 永不被抢 ownership）
+    newregiontext=""
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      if in_word_list "$k" "$outside"; then continue; fi
+      if [ -n "$newregiontext" ]; then newregiontext="$newregiontext
+"; fi
+      newregiontext="$newregiontext$k = $d"
+    done <<EOF
+$desired
+EOF
+    newregionhash="$(agents_region_hash_of "$newregiontext")"
+    if [ "$newregionhash" = "$pblockhash" ]; then
+      log "[agents] reconcile: 托管区未变（未修改文件）: $1"
+      manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    # 托管区未改且 desired 变了 → 摘旧 region 写新 region（同一 txn 内；origin 身份不换）
+    if [ "$MODE" = "--dry-run" ]; then log "dry-run [agents] region upgrade: $1"; return; fi
+    local created=0 modified=1 ownership="user" txn=""
+    [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    remove_managed_block "$1" agents-toml "$begin" "$end"
+    if grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
+      # keys-only 形状（表头在托管区外）：表头后插 markers + 新 region keys
+      awk -v b="$begin" -v e="$end" -v keys="$newregiontext" '
+        BEGIN { n = split(keys, klines, "\n") }
+        { print }
+        $0 ~ /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ && !done {
+          print b
+          for (i = 1; i <= n; i++) { if (klines[i] != "") print klines[i] }
+          print e
+          done = 1
+        }
+      ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+    else
+      # 整文件形状（托管区含 [agents] 表头）：整块重建
+      {
+        printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
+        printf '%s\n' "$newregiontext"
+        printf '%s\n' "$end"
+      } >> "$1"
+      newregionhash="$(agents_region_hash_of "$(printf '[agents]\n%s' "$newregiontext")")"
+    fi
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newregionhash" "backup=$pbackup"
+    log "[agents] region upgrade: $1"
+    return
+  fi
+  # markers 不存在：逐 key 分类（reconcile plan）
   local k d c st conflicts=0 addlines="" desired=""
   desired="$(agents_desired || true)"
   cqs_debug "desired=[$(printf '%s' "$desired" | tr '\n' '|')]"
@@ -380,9 +512,17 @@ EOF
     log "[agents] reconcile: 全部 adopt（未修改文件）: $1"
     return
   fi
-  # 文本补丁：表头后插 markers + 缺失 keys（绝不整文件序列化）
-  local backup=""
-  if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
+  # 文本补丁：表头后插 markers + 缺失 keys（markers 不存在才走到这里；绝不整文件序列化）
+  local backup="" txn="" created=0 modified=1 ownership="user"
+  [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+  if [ "$pcreated" = "1" ]; then
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+  elif [ -n "$pbackup" ]; then
+    backup="$pbackup"
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+  else
+    backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+  fi
   awk -v begin="$begin" -v end="$end" -v keys="$addlines" '
     BEGIN { split(keys, klines, "\n") }
     { print }
@@ -393,7 +533,7 @@ EOF
       done = 1
     }
   ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
-  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$backup"
+  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$(agents_region_hash_of "${addlines#?}")" "backup=$backup"
   log "reconcile [agents]: 插入缺失 keys → $1"
 }
 
