@@ -23,8 +23,15 @@ MANIFEST="$CODEX_HOME/.codex-quota-saver-manifest"
 MANIFEST_JOURNAL="$MANIFEST.tmp"
 
 log() { echo "[cqs] $*"; }
-# 测试/排障专用跟踪（默认关闭；CQS_TEST_DEBUG=1 时输出 reconcile 内部状态）
-cqs_debug() { [ -n "${CQS_TEST_DEBUG:-}" ] && log "DEBUG: $*"; }
+# 测试/排障专用跟踪（默认关闭；CQS_TEST_DEBUG=1 时输出 reconcile 内部状态）。
+# 必须恒返回 0：`[ -n ] && log` 在变量未设置时列表返回 1，函数返回非零会被
+# 调用处的 set -e 当场击落（2026-08-17 CI 现场：二次安装全部静默失败即此因）。
+cqs_debug() {
+  if [ -n "${CQS_TEST_DEBUG:-}" ]; then
+    log "DEBUG: $*"
+  fi
+  return 0
+}
 
 # manifest 行式格式: action<TAB>dest<TAB>key=value 空格分隔（显式 TAB 连接，$* 会用 IFS 首字符=空格）
 # dry-run 下为 no-op（dry-run 必须零落盘；skip 条目只属于真实安装）
