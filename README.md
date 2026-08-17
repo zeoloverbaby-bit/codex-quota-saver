@@ -104,6 +104,8 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 一条命令自动装完依赖、生成密钥、捕获连接器参数；你全程只需两件事（脚本会提示时机）：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
 
+> 授权时若浏览器弹出英文警告页（ngrok 免费版拦截页「You are about to visit…」）：**点一次 Visit Site** 即可，cookie 持久、之后不再出现。桥启动 15 秒后会自动打开浏览器到桥密码页预热这一步（v1.6.4 起）。
+
 > 没桥也能跑三层架构：GPT 把 `.codex/next-step.md` 全文输出给你，手动落盘即可。桥的完整说明、手动兜底与冒烟测试见 [bridge/README.md](bridge/README.md)。
 
 ### 第 4 步 · 配置网页 GPT（分析层）
@@ -156,6 +158,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 - **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-16）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
 - **Observed behavior · verified_at=2026-08-16**：改动 AGENTS.md / config 后必须开新会话才生效
 - **Observed behavior · verified_at=2026-08-16**：v1.5.0 及以前安装会把三层协议追加到全局 `~/.codex/AGENTS.md`。升级到 v1.6.0 后建议迁移：删除全局 AGENTS.md 中旧的两个小节（标记「可整体删除回滚」），改为依赖项目根 `AGENTS.md`（重新运行新 install 写入）
+- **Observed behavior · verified_at=2026-08-17**：ngrok 免费版拦截页（英文「You are about to visit…」警告页）**无法用技术手段跳过**（官方明确禁止注入 skip 头，实测 ERR_NGROK_7096）——新浏览器首次访问桥域名需手动点一次「Visit Site」（cookie 按浏览器持久）。v1.6.4 起启动器在启动 15 秒后自动打开桥密码页预热，把这一步提前到启动时（见 [bridge/README.md](bridge/README.md)）
 
 更多坑见 [docs/pitfalls.md](docs/pitfalls.md)；执行纪律的方法论总纲见 [docs/lean-execution.md](docs/lean-execution.md)；想量化省了多少额度，用 [eval/](eval/) 的 A/B 评测方案。
 

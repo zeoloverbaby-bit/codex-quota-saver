@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Changed
+- README：部署第 3 步与「已知问题」清单补充 ngrok 免费版拦截页说明（无法技术跳过、点一次 Visit Site、v1.6.4 起启动器自动预热）
+
 ## [1.6.4] - 2026-08-17
 
 ### Added
