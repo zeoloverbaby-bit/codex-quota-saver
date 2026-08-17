@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-08-17
+
+### Fixed
+- bridge/setup.ps1：launcher ACL 收紧误用 `(R,W)` 缺执行位，导致 Windows 双击 `start-bridge.local.bat` 报「Windows 无法访问指定设备、路径或文件。你可能没有适当的权限访问该项目」。改为 `(RX,W)`；secrets 保持 `(R,W)` 不变
+- ACL 逻辑抽取为 `bridge/acl.ps1`（Rights 参数化）+ 新增 `tests/setup-acl.Tests.ps1` 回归测试（icacls 真实验证执行位）；CI windows 腿改为全量 `tests/` + 分析 `acl.ps1`
+- CHANGELOG：v1.6.0 内容此前滞留 `[Unreleased]`，补 `[1.6.0]` 版本段
+
+## [1.6.0] - 2026-08-17
+
 ### Security
 - bridge-guard：MCP 桥能力层白名单（只读类工具 + write_next_step），取代 prompt 级约束
 - bridge-guard：自建 OAuth 2.1 授权服务器（授权码 + PKCE + DCR；注册表与签名密钥落盘 = 重启免疫；7 天 JWT）。ChatGPT 连接器实测只有 OAuth/无认证/混合三种认证方式，无 API key 选项——API key 方案因此废弃
