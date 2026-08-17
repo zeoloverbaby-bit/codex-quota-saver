@@ -164,7 +164,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## Roadmap 与稳定 Gate
 
-以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
+以下 gate 全部通过前，本仓库保持 Public Alpha（GitHub Release 均为 versioned development release，非 Stable milestone）；全部 Stable Gates 通过后发布首个明确标记为 Stable 的版本：
 
 - [x] 安全边界硬化：MCP 桥能力层白名单 + 自建 OAuth 认证（bridge-guard）已发布
 - [x] Windows + Ubuntu CI 绿（installer / eval / 静态检查 / gitleaks / link check；macOS experimental / 未验证）

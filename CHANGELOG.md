@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Security
+- write_next_step 物理边界防逃逸（P0）：`.codex` / `next-step.md` 为符号链接时 fail-closed 拒绝（绝不 follow），realpath 边界包含检查兜底 Windows junction；写入改为同目录临时文件 + fsync + `os.replace` 原子写（实测修复前 junction 逃逸可把内容写进 workspace 外）
+- installer 生命周期幂等（P0）：manifest 从「最近一次运行快照」改为 persistent provenance ledger——重复安装按 dest 合并旧条目（created/modified 只增不减、backup 身份只保留第一份 origin、installed_hash 沿用旧值），`install→install→uninstall` 与 `install→uninstall` 等价（覆盖恢复 ORIGINAL / CQS 创建全移除 / 用户安装后修改绝不再次覆盖）；备份名唯一化防同秒覆盖
+- installer transaction 语义（P1）：写入只进 journal、全部成功才原子提交，旧 manifest 提交前绝不删除（bash 原在 mutation 前删除旧 manifest）；中途失败按文件系统事实回滚本轮 mutation、journal 留存并打印恢复指引，绝不打印成功
+- installer [agents] 窄 key 级 semantic reconciliation（P1）：缺失→插入 managed markers、相同→ADOPT、更严且满足不变量→ADOPT_STRICTER（如线程上限 4 < 6 保留用户值）、破坏不变量→CONFLICT fail-fast（preflight 在任何 mutation 前终止，打印 key/当前值/期望值/影响）；期望值运行时读自 global/config-agents.toml；绝不整文件序列化、不新增依赖
+- OAuth 公网入口 bounded state（P1）：MAX_CLIENTS / MAX_PENDING / MAX_CODES + 惰性 prune（DCR/authorize/code 不再无限膨胀；拒绝新请求、绝不驱逐既有合法 state）；撤销口径修正——运行中删除 oauth_state.json 不撤销任何 token，立即撤销 = 停桥 → 删文件 → 重启
+
+### Added
+- 回归测试：guard symlink 逃逸 3 个（Windows junction 本地复现）；installer 重复安装 Case A-F（Pester + bats）+ 备份身份/Merge 规则单测 + partial failure 注入（`CQS_TEST_FAIL_AFTER` 钩子，默认关闭）；[agents] reconcile 分类矩阵 + 冲突 preflight 零落盘（Pester + bats）；OAuth 上限/清理 5 个 + 撤销语义锚定 1 个
+
+### Changed
+- 文档事实修正（2026-08-17 官方源码复核）：`features.multi_agent_v2` 配置键存在（布尔/结构化表两种形态，Stable 阶段、默认关闭）——旧「查无实据」结论更正；Stable contract 与 Known upstream bug（#36294/#35097 Open，PR #32751 backend 兼容限制）分层表达
+- README release 口径：Public Alpha 期间 GitHub Release 均为 versioned development release；全部 Stable Gates 通过后发布首个明确标记为 Stable 的版本
+- eval/README mini-ops 数字标注「设计目标，基准仓库尚未构建」；CHANGELOG v1.6.5 移除与同版本「易漂移计数移除」相矛盾的措辞
+
 ## [1.6.5] - 2026-08-17
 
 ### Security
@@ -13,7 +28,7 @@
 - Capability Taxonomy 文档化（bridge/README）：Planner 最小充分认知权限 = repository_read + git_read + handoff（唯一 mutation = write_next_step）；diagnostics / mutation 类工具协议层不存在；本轮验证 Git Read 集合已完整（git_status 含 branch/HEAD/upstream/ahead-behind），窄缺口（两 refs 间 diff / merge-base / refs 枚举）记录为未来候选只读工具，绝不开放 exec_command
 
 ### Added
-- docs/pitfalls.md：新增坑 16-19（桥加固期：NUL env 窗口消失 / ACL 执行位 / 421 DNS-rebinding / ngrok 拦截页）；排坑表 15 → 19 坑，README 计数同步
+- docs/pitfalls.md：新增坑 16-19（桥加固期：NUL env 窗口消失 / ACL 执行位 / 421 DNS-rebinding / ngrok 拦截页）；排坑表 15 → 19 坑
 - 回归测试：installer ownership 全场景（Pester + bats：用户文件保留 / 合并摘块 / 创建删除 / 恢复原备份 / 用户修改保护 / legacy 保守）；OAuth state ACL（Pester 目录继承行为 + setup 源码断言；pytest POSIX 权限位）；launcher env token 模板断言；guard 工具契约测试（锚定 0.3.0 目录，防上游漂移）
 
 ### Changed

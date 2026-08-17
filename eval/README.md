@@ -159,7 +159,7 @@ model_reasoning_effort = "high"
 
 ### 4.2 基准仓库 mini-ops 设计
 
-Python + uv + pytest + SQLite 的小型任务流水线（镜像真实项目形态，约 12 个文件、基线约 35 个测试全绿）：
+Python + uv + pytest + SQLite 的小型任务流水线（镜像真实项目形态，设计目标：约 12 个文件、计划基线约 35 个测试；基准仓库尚未构建/验证）：
 
 ```
 mini_ops/
