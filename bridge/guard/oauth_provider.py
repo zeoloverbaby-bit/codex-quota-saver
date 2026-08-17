@@ -26,7 +26,9 @@ from mcp.server.auth.handlers.metadata import MetadataHandler
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -40,6 +42,11 @@ ACCESS_TOKEN_TTL = 7 * 24 * 3600  # 与旧桥 CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=6
 CODE_TTL = 300  # 授权码 5 分钟
 PENDING_TTL = 600  # 待授权请求 10 分钟
 MAX_PASSWORD_ATTEMPTS = 5  # 每个待授权请求最多试错次数
+# 公网入口 bounded state：ngrok 域名公开可达，匿名 DCR/authorize 不能无限膨胀资源。
+# 拒绝语义 = 拒绝新请求、绝不驱逐仍合法的既有 state（单用户桥正常用量远低于上限）。
+MAX_CLIENTS = 100  # 落盘客户端注册表上限（单用户桥只需个位数；重启免疫不受影响）
+MAX_PENDING = 50  # 内存待授权请求上限
+MAX_CODES = 50  # 内存授权码上限
 
 LOGIN_HTML = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>bridge-guard 授权</title></head>
@@ -111,16 +118,42 @@ class GuardOAuthProvider:
         except OSError:  # pragma: no cover
             pass  # Windows 不适用；目录权限由 bridge/setup.* 收紧
 
+    # ---- 惰性清理（无后台线程；在 register/authorize/complete/exchange 入口调用）----
+    def _prune_pending(self):
+        now = time.time()
+        # >= ：恰好到 TTL 边界的条目同样视为过期（Windows 时钟粒度粗，> 会漏判同 tick 条目）
+        expired = [k for k, e in self._pending.items() if now - e[2] >= PENDING_TTL]
+        for k in expired:
+            self._pending.pop(k, None)
+
+    def _prune_codes(self):
+        now = time.time()
+        expired = [k for k, c in self._codes.items() if c.expires_at < now]
+        for k in expired:
+            self._codes.pop(k, None)
+
     # ---- 客户端注册（DCR，落盘 → 重启免疫） ----
     async def get_client(self, client_id):
         return self._clients.get(client_id)
 
     async def register_client(self, client_info):
+        # 上限：拒绝新注册（SDK 映射 HTTP 400），绝不驱逐既有合法 client
+        if len(self._clients) >= MAX_CLIENTS:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="client registration limit reached",
+            )
         self._clients[client_info.client_id] = client_info
         self._save_state()
 
     # ---- 授权码流程 ----
     async def authorize(self, client, params):
+        self._prune_pending()
+        if len(self._pending) >= MAX_PENDING:
+            raise AuthorizeError(
+                error="temporarily_unavailable",
+                error_description="too many pending authorization requests",
+            )
         key = secrets.token_urlsafe(24)
         self._pending[key] = [client.client_id, params, time.time(), 0]
         return f"{self._issuer}/auth/login?request={key}"
@@ -141,6 +174,9 @@ class GuardOAuthProvider:
                 self._pending.pop(request_key, None)
             return None
         self._pending.pop(request_key, None)
+        self._prune_codes()
+        if len(self._codes) >= MAX_CODES:
+            return None  # 上限拒绝发新码（登录页 401）；既有码不驱逐
         code = secrets.token_urlsafe(32)
         self._codes[code] = AuthorizationCode(
             code=code,
@@ -155,6 +191,7 @@ class GuardOAuthProvider:
         return params.redirect_uri, code, params.state
 
     async def load_authorization_code(self, client, authorization_code):
+        self._prune_codes()
         # 一次性使用：取出即销毁
         c = self._codes.pop(authorization_code, None)
         if c is None or c.client_id != client.client_id:
