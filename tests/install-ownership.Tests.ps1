@@ -220,6 +220,17 @@ Describe '重复安装所有权保持（P0：install×N→uninstall 与 install�
         (Get-Content $worker -Raw -Encoding UTF8).Trim() | Should -Be 'ORIGINAL'
         (Get-ChildItem "$codex/agents/*.bak*").Count | Should -Be 0
     }
+    It '已有 [agents] 表 install×2 → uninstall：markers 摘除、用户 key 原样（reconcile Case F）' {
+        $codex = "$TestDrive/codex-agF"
+        New-Item -ItemType Directory -Force $codex | Out-Null
+        $cfg = New-Item -ItemType File "$codex/config.toml"
+        Set-Content $cfg -Value "[agents]`nenabled = true`n" -Encoding UTF8
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-agF"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Get-Content $cfg -Raw -Encoding UTF8).Trim() | Should -Be "[agents]`nenabled = true"
+    }
 }
 
 Describe '备份身份与生命周期合并规则（Persistent Provenance Ledger）' {

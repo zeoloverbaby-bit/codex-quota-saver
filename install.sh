@@ -143,37 +143,168 @@ remove_managed_block() { # $1=file $2=id [$3=begin $4=end]（默认 HTML 注释�
   log "remove block: $1"
 }
 
-merge_agents_toml() { # $1=file
+# ---- [agents] 窄 key 级语义 reconciliation（NARROW：只 4 个 CQS 关注 key；不是 TOML merger）----
+# 四态：missing→ADD / 相同→ADOPT / 更严但满足不变量→ADOPT_STRICTER / 破坏不变量→CONFLICT。
+# 期望值运行时读自 global/config-agents.toml（source of truth）；冲突 = fail-fast
+# （preflight 在任何 mutation 前终止）；文本补丁只在现有表头后插 markers+缺失 keys。
+agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号）
+  local f="$REPO_ROOT/global/config-agents.toml" inagents=0 line k v
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$inagents" = "0" ]; then
+      case "$line" in
+        [[:space:]]*\[agents\][[:space:]]*) inagents=1 ;;
+      esac
+      continue
+    fi
+    case "$line" in
+      ""|\#*) continue ;;
+      [[:space:]]*\[*) return 0 ;;
+    esac
+    k="${line%%=*}"; k="${k# }"; k="${k% }"
+    if [[ "$k" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+      v="${line#*=}"; v="${v# }"; v="${v% }"
+      printf '%s\t%s\n' "$k" "$v"
+    fi
+  done < "$f"
+}
+
+agents_span_value() { # $1=file $2=key → [agents] span 内该 key 的原始值；未找到→空
+  sed -n '/^[[:space:]]*\[agents\][[:space:]]*\(#.*\)*$/,/^[[:space:]]*\[/p' "$1" \
+    | grep -E "^[[:space:]]*$2[[:space:]]*=" | head -n 1 \
+    | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*#[^"]*$//' | sed 's/[[:space:]]*$//'
+}
+
+agents_classify() { # $1=key $2=desiredRaw $3=currentRaw(空=missing) → add|adopt|adopt_stricter|conflict|manual
+  local k="$1" d="$2" c="$3" dnorm cnorm ci di
+  if [ -z "$c" ]; then echo "add"; return; fi
+  case "$k" in
+    enabled)
+      case "$c" in true|false) ;; *) echo "manual"; return ;; esac
+      [ "$c" = "$d" ] && echo "adopt" || echo "conflict"
+      ;;
+    default_subagent_model|default_subagent_reasoning_effort)
+      dnorm="${d%\"}"; dnorm="${dnorm#\"}"; cnorm="${c%\"}"; cnorm="${cnorm#\"}"
+      [ "$cnorm" = "$dnorm" ] && echo "adopt" || echo "conflict"
+      ;;
+    max_concurrent_threads_per_session)
+      case "$c" in *[!0-9]*|"") echo "manual"; return ;; esac
+      ci="$c"; di="$d"
+      if [ "$ci" -eq "$di" ]; then echo "adopt"; return; fi
+      if [ "$ci" -lt "$di" ]; then echo "adopt_stricter"; return; fi   # 更严上限满足 ≤desired 不变量
+      echo "conflict"
+      ;;
+    *) echo "manual" ;;
+  esac
+}
+
+agents_key_impact() {
+  case "$1" in
+    enabled) echo "CQS 依赖多代理协作（Luna worker 子代理），enabled=false 会让 [agents] 失效" ;;
+    default_subagent_model) echo "CQS 无法保证 Luna 默认子代理路由（期望 gpt-5.6-luna）" ;;
+    default_subagent_reasoning_effort) echo "CQS 交接质量依赖 max 推理档" ;;
+    max_concurrent_threads_per_session) echo "超过 CQS 配额上限 6，破坏额度节省不变量" ;;
+    *) echo "CQS 配置契约冲突" ;;
+  esac
+}
+
+agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析 → exit 1
+  local f="$1" k d c st conflicts=0
+  [ -f "$f" ] || return 0
+  grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$f" || return 0
+  while IFS=$'\t' read -r k d; do
+    c="$(agents_span_value "$f" "$k" || true)"
+    st="$(agents_classify "$k" "$d" "$c")"
+    case "$st" in
+      manual|conflict)
+        conflicts=1
+        log "Conflict: [agents].$k"
+        log "  Current: $c"
+        log "  CQS expected: $d"
+        log "  Impact: $(agents_key_impact "$k")"
+        ;;
+    esac
+  done < <(agents_desired)
+  if [ "$conflicts" = "1" ]; then
+    log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast，任何修改前终止）。"
+    exit 1
+  fi
+}
+
+merge_agents_toml() { # $1=file —— key 级 reconciliation
   local prev="" pcreated="" pbackup=""
   prev="$(prev_line "$1")"
   [ -z "$prev" ] || pcreated="$(manifest_field "$prev" created_by_cqs)"
   [ -z "$prev" ] || pbackup="$(manifest_field "$prev" backup)"
-  if [ -f "$1" ] && grep -qE '^[[:space:]]*\[agents\]' "$1"; then
-    log "skip ([agents] present): $1"
-    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$pbackup"
+  local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
+  # 无 [agents] 表（文件不存在或表不存在）：整块 append（CQS 拥有整个表）
+  if [ ! -f "$1" ] || ! grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
+    if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
+    local existed=0 created=1 modified=0 ownership="cqs" backup=""
+    [ -f "$1" ] && existed=1
+    if [ "$existed" = "1" ]; then
+      if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
+      created=0; modified=1; ownership="user"
+    else
+      track_created "$1"
+    fi
+    {
+      printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
+      while IFS=$'\t' read -r k d; do printf '%s = %s\n' "$k" "$d"; done < <(agents_desired)
+      printf '%s\n' "$end"
+    } >> "$1"
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
+    log "append [agents]: $1"
     return
   fi
-  if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
-  local existed=0 created=1 modified=0 ownership="cqs" backup=""
-  [ -f "$1" ] && existed=1
-  if [ "$existed" = "1" ]; then
-    if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
-    created=0; modified=1; ownership="user"
-  else
-    track_created "$1"
+  # 表存在：逐 key 分类（reconcile plan）
+  local k d c st conflicts=0 addlines="" stricters=0
+  while IFS=$'\t' read -r k d; do
+    c="$(agents_span_value "$1" "$k" || true)"
+    st="$(agents_classify "$k" "$d" "$c")"
+    case "$st" in
+      manual)
+        log "config.toml [agents] 段含无法可靠解析的内容，跳过自动修改（fail-safe），请人工处理: $1"
+        manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "backup=$pbackup"
+        return
+        ;;
+      conflict)
+        conflicts=1
+        log "Conflict: [agents].$k"
+        log "  Current: $c"
+        log "  CQS expected: $d"
+        log "  Impact: $(agents_key_impact "$k")"
+        ;;
+      add) addlines="$addlines
+$k = $d" ;;
+      adopt) : ;;
+      adopt_stricter) log "已采纳用户更严值 [agents].$k = $c（满足 CQS 不变量，不覆盖）" ;;
+    esac
+  done < <(agents_desired)
+  if [ "$MODE" = "--dry-run" ]; then log "dry-run reconcile plan: $1（详见上方冲突/采纳输出）"; return; fi
+  if [ "$conflicts" = "1" ]; then
+    log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast）。"
+    exit 1
   fi
-  cat >> "$1" <<'EOF'
-
-# --- codex-quota-saver managed [agents] begin ---
-[agents]
-enabled = true
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "max"
-max_concurrent_threads_per_session = 6
-# --- codex-quota-saver managed [agents] end ---
-EOF
-  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
-  log "append [agents]: $1"
+  if [ -z "$addlines" ]; then
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "backup=$pbackup"
+    log "[agents] reconcile: 全部 adopt（未修改文件）: $1"
+    return
+  fi
+  # 文本补丁：表头后插 markers + 缺失 keys（绝不整文件序列化）
+  local backup=""
+  if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
+  awk -v begin="$begin" -v end="$end" -v keys="$addlines" '
+    BEGIN { split(keys, klines, "\n") }
+    { print }
+    $0 ~ /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ && !done {
+      print begin
+      for (i = 1; i in klines; i++) { if (klines[i] != "") print klines[i] }
+      print end
+      done = 1
+    }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$backup"
+  log "reconcile [agents]: 插入缺失 keys → $1"
 }
 
 install_file() { # $1=src $2=dest $3=skip_if_exists(0/1) $4=overwrite_if_changed(0/1)
@@ -284,6 +415,9 @@ if [ -z "$PROJECT_PATH" ] || [ ! -d "$PROJECT_PATH" ]; then
   echo "项目路径不存在"
   exit 1
 fi
+
+# preflight（任何 filesystem mutation 之前）：config.toml [agents] 冲突 → fail-fast
+if [ "$MODE" = "install" ]; then agents_preflight "$CODEX_HOME/config.toml"; fi
 
 # dry-run 不得落任何文件（目录也不建）；uninstall 已提前退出
 if [ "$MODE" = "install" ]; then

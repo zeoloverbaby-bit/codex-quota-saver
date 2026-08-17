@@ -22,12 +22,55 @@ teardown() { rm -rf "$TESTDIR"; }
   [ "$count" -eq 1 ]
 }
 
-@test "config.toml 已有 [agents] 段时跳过" {
+@test "已有部分 [agents] 表：缺失 key 插入现有表内，不产生第二个表（reconcile Case B）" {
   mkdir -p "$CQS_TEST_CODEX_HOME"
   printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
   bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
-  run grep -c 'default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^\[agents\]' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'default_subagent_model = "gpt-5.6-luna"' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^enabled =' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -qF '# --- codex-quota-saver managed [agents] begin ---' "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
+@test "compatible key：ADOPT 不重复（reconcile Case C）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\ndefault_subagent_model = "gpt-5.6-luna"\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(grep -c '^default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
+@test "conflict：fail-fast 退出非零、文件字节不变、零 mutation（reconcile Case D）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\ndefault_subagent_model = "other-model"\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  cp "$CQS_TEST_CODEX_HOME/config.toml" "$TESTDIR/config.before"
+  run bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
   [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/config.before" "$CQS_TEST_CODEX_HOME/config.toml"
+  [ ! -f "$CQS_TEST_CODEX_HOME/AGENTS.md" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" ]
+}
+
+@test "mixed：adopt + adopt_stricter + add——只插缺失 key，保留用户更严值（reconcile Case E）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nenabled = true\ndefault_subagent_model = "gpt-5.6-luna"\nmax_concurrent_threads_per_session = 4\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(grep -c '^max_concurrent_threads_per_session' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'max_concurrent_threads_per_session = 4' "$CQS_TEST_CODEX_HOME/config.toml"
+  ! grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+}
+
+@test "已有 [agents] 表 install×2 → uninstall：markers 摘除、用户 key 原样（reconcile Case F）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/config.toml")" = "$(printf '[agents]\nenabled = true')" ]
 }
 
 @test "uninstall 移除托管块（HTML 标记 + TOML [agents] 段）" {

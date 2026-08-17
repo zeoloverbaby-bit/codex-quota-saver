@@ -101,36 +101,203 @@ function Remove-ManagedBlock([string]$Path, [string]$Id, [string]$Begin, [string
     return @{action='remove-block';dest=$Path;id=$Id}
 }
 
-# [agents] 段追加；已有该段则完全跳过（不备份不覆盖）
-function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
-    $block = @"
+# ---- [agents] 窄 key 级语义 reconciliation（NARROW：只 CQS 关注的 4 个 key；不是 TOML merger）----
+# 四态：missing→ADD / 相同→ADOPT / 更严但满足不变量→ADOPT_STRICTER / 破坏不变量→CONFLICT。
+# 期望值运行时读自 global/config-agents.toml（source of truth）；语义规则（类型 + 更严判定）
+# 是显式代码。冲突 = fail-fast（preflight 在任何 mutation 前终止）；绝不静默覆盖用户值；
+# 文本补丁只在现有表头后插 markers+缺失 keys，绝不整文件序列化。
+function Get-AgentsDesiredState {
+    $toml = Get-Content (Join-Path $RepoRoot 'global\config-agents.toml') -Raw -Encoding UTF8
+    $found = @{}
+    $inAgents = $false
+    foreach ($line in ($toml -split "`r?`n")) {
+        if ($line -match '^\s*\[agents\]\s*(#.*)?$') { $inAgents = $true; continue }
+        if ($inAgents) {
+            if ($line -match '^\s*\[') { break }
+            if ($line -match '^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$') {
+                $found[$Matches[1]] = $Matches[2].Trim()
+            }
+        }
+    }
+    $policy = [ordered]@{
+        'enabled'                            = 'bool'
+        'default_subagent_model'             = 'string'
+        'default_subagent_reasoning_effort'  = 'string'
+        'max_concurrent_threads_per_session' = 'int'
+    }
+    $desired = [ordered]@{}
+    foreach ($k in $policy.Keys) {
+        if (-not $found.ContainsKey($k)) { throw "global/config-agents.toml 缺少期望 key [$k]（source of truth 损坏）" }
+        $desired[$k] = @{ raw = $found[$k]; type = $policy[$k] }
+    }
+    return $desired
+}
+
+function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired) {
+    # 返回: table_exists / header_index / states(key→add|adopt|adopt_stricter|conflict) /
+    #       current(key→原始值) / writer_supported（span 内出现无法可靠解析的行 = false）
+    $plan = @{ table_exists = $false; header_index = -1; states = @{}; current = @{}; writer_supported = $true }
+    $lines = $raw -split "`r?`n"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*\[agents\]\s*(#.*)?$') {
+            $plan.table_exists = $true
+            $plan.header_index = $i
+            $spanEnd = $lines.Count
+            for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match '^\s*\[') { $spanEnd = $j; break }
+            }
+            for ($j = $i + 1; $j -lt $spanEnd; $j++) {
+                $ln = $lines[$j]
+                if ($ln -match '^\s*(#.*)?$') { continue }
+                if ($ln -match '^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*(?:#.*)?$') {
+                    $plan.current[$Matches[1]] = $Matches[2].Trim()
+                } else {
+                    $plan.writer_supported = $false   # 多行值等无法可靠定位 → fail-safe 人工
+                }
+            }
+            break
+        }
+    }
+    foreach ($k in $Desired.Keys) {
+        $d = $Desired[$k]
+        if (-not $plan.current.ContainsKey($k)) { $plan.states[$k] = 'add'; continue }
+        $cur = $plan.current[$k]
+        switch ($d.type) {
+            'bool' { if ($cur -notin @('true','false')) { $plan.writer_supported = $false } }
+            'int'  { if ($cur -notmatch '^\d+$') { $plan.writer_supported = $false } }
+        }
+        if (-not $plan.writer_supported) { $plan.states[$k] = 'conflict'; continue }
+        $curNorm = $cur.Trim('"')
+        if ($d.type -eq 'int') {
+            $desiredInt = [int]$d.raw
+            $curInt = [int]$cur
+            if ($curInt -eq $desiredInt) { $plan.states[$k] = 'adopt' }
+            elseif ($curInt -lt $desiredInt) { $plan.states[$k] = 'adopt_stricter' }
+            else { $plan.states[$k] = 'conflict' }
+        } else {
+            if ($curNorm -eq $d.raw.Trim('"')) { $plan.states[$k] = 'adopt' }
+            else { $plan.states[$k] = 'conflict' }
+        }
+    }
+    return $plan
+}
+
+function Get-AgentsKeyImpact([string]$Key) {
+    switch ($Key) {
+        'enabled' { return 'CQS 依赖多代理协作（Luna worker 子代理），enabled=false 会让 [agents] 失效' }
+        'default_subagent_model' { return 'CQS 无法保证 Luna 默认子代理路由（期望 gpt-5.6-luna）' }
+        'default_subagent_reasoning_effort' { return 'CQS 交接质量依赖 max 推理档' }
+        'max_concurrent_threads_per_session' { return '超过 CQS 配额上限 6，破坏额度节省不变量' }
+        default { return 'CQS 配置契约冲突' }
+    }
+}
+
+function Write-AgentsConflictReport($Plan, [hashtable]$Desired) {
+    foreach ($k in $Desired.Keys) {
+        if ($Plan.states[$k] -eq 'conflict') {
+            Write-Host "  [agents].$k"
+            Write-Host "    当前值: $($Plan.current[$k])"
+            Write-Host "    CQS 期望: $($Desired[$k].raw)"
+            Write-Host "    影响: $(Get-AgentsKeyImpact $k)"
+        }
+    }
+}
+
+function New-AgentsManagedBlock([hashtable]$Desired) {
+    return @"
 
 # --- codex-quota-saver managed [agents] begin ---
 [agents]
-enabled = true
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "max"
-max_concurrent_threads_per_session = 6
+enabled = $($Desired['enabled'].raw)
+default_subagent_model = $($Desired['default_subagent_model'].raw)
+default_subagent_reasoning_effort = $($Desired['default_subagent_reasoning_effort'].raw)
+max_concurrent_threads_per_session = $($Desired['max_concurrent_threads_per_session'].raw)
 # --- codex-quota-saver managed [agents] end ---
 "@
+}
+
+function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
+    $begin = '# --- codex-quota-saver managed [agents] begin ---'
+    $end   = '# --- codex-quota-saver managed [agents] end ---'
+    $desired = Get-AgentsDesiredState
     $existed = Test-Path $Path
-    if ($existed) {
-        $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
-        if ($raw -match '(?m)^\s*\[agents\]') {
-            return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-present';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true})
-        }
+    if (-not $existed) {
+        # 文件不存在：整块创建（CQS 拥有整个表）
+        if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
+        Add-Content -Path $Path -Value (New-AgentsManagedBlock $desired) -Encoding UTF8
+        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$null;managed_block_id='agents-toml';ownership='cqs';created_by_cqs=$true;modified_by_cqs=$false;created_this_run=$true;backup_created_this_run=$false})
     }
-    if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
-    $backup = $null
-    $backupCreatedThisRun = $false
-    if ($existed) {
+    $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
+    $plan = Get-AgentsReconcilePlan -Raw $raw -Desired $desired
+    if (-not $plan.table_exists) {
+        # 文件存在但无 [agents] 表：整块 append（用户文件 → 备份 + user ownership）
+        if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
+        $backup = $null
+        $backupCreatedThisRun = $false
         if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
         else { $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true }
+        Add-Content -Path $Path -Value (New-AgentsManagedBlock $desired) -Encoding UTF8
+        return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun})
     }
-    Add-Content -Path $Path -Value $block -Encoding UTF8
-    $ownership = 'cqs'; $modified = $false
-    if ($existed) { $ownership = 'user'; $modified = $true }
-    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=(-not $existed);modified_by_cqs=$modified;created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun})
+    $conflictKeys = @($plan.states.GetEnumerator() | Where-Object { $_.Value -eq 'conflict' })
+    if ($DryRun) {
+        Write-Host '[agents] reconcile 计划：'
+        foreach ($k in $desired.Keys) {
+            $st = $plan.states[$k]
+            if ($st -eq 'add') { Write-Host "  ADD              $k = $($desired[$k].raw)" }
+            elseif ($st -eq 'adopt') { Write-Host "  ADOPT            $k（已一致，不修改）" }
+            elseif ($st -eq 'adopt_stricter') { Write-Host "  ADOPT_STRICTER   $k = $($plan.current[$k])（保留用户更严值）" }
+            elseif ($st -eq 'conflict') { Write-Host "  CONFLICT         $k（当前 $($plan.current[$k])，CQS 期望 $($desired[$k].raw)）" }
+        }
+        return @{action='skip';dest=$Path;dry=$true;reason='agents-reconcile-plan'}
+    }
+    if (-not $plan.writer_supported) {
+        Write-Host "config.toml [agents] 段含无法可靠解析的内容，跳过自动修改（fail-safe），请人工处理: $Path"
+        return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-manual';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
+    }
+    if ($conflictKeys.Count -gt 0) {
+        Write-Host "config.toml [agents] 冲突（fail-fast）："
+        Write-AgentsConflictReport $plan $desired
+        throw "[agents] config conflict——安装终止；请调整 config.toml 后重试"
+    }
+    foreach ($k in $desired.Keys) {
+        if ($plan.states[$k] -eq 'adopt_stricter') {
+            Write-Host "已采纳用户更严值 [agents].$k = $($plan.current[$k])（满足 CQS 不变量，不覆盖）"
+        }
+    }
+    $addKeys = @($desired.Keys | Where-Object { $plan.states[$_] -eq 'add' })
+    if ($addKeys.Count -eq 0) {
+        return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='agents-adopted';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$false})
+    }
+    # 文本补丁：表头后插 markers + 缺失 keys（绝不整文件序列化；保留换行风格）
+    $nl = "`r`n"; if (-not $raw.Contains("`r`n")) { $nl = "`n" }
+    $lines = $raw -split "`r?`n"
+    $newLines = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -le $plan.header_index; $i++) { [void]$newLines.Add($lines[$i]) }
+    [void]$newLines.Add($begin)
+    foreach ($k in $desired.Keys) { if ($plan.states[$k] -eq 'add') { [void]$newLines.Add("$k = $($desired[$k].raw)") } }
+    [void]$newLines.Add($end)
+    for ($i = $plan.header_index + 1; $i -lt $lines.Count; $i++) { [void]$newLines.Add($lines[$i]) }
+    $backup = $null
+    $backupCreatedThisRun = $false
+    if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
+    else { $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true }
+    Set-Content -Path $Path -Value ($newLines -join $nl) -Encoding UTF8
+    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun})
+}
+
+function Assert-AgentsPreflight([string]$ConfigPath) {
+    # 任何 filesystem mutation 之前：config.toml [agents] 冲突/无法解析 → fail-fast 终止
+    if (-not (Test-Path $ConfigPath)) { return }
+    $desired = Get-AgentsDesiredState
+    $plan = Get-AgentsReconcilePlan -Raw "$(Get-Content $ConfigPath -Raw -Encoding UTF8)" -Desired $desired
+    if (-not $plan.table_exists) { return }
+    $conflictKeys = @($plan.states.GetEnumerator() | Where-Object { $_.Value -eq 'conflict' })
+    if (-not $plan.writer_supported -or $conflictKeys.Count -gt 0) {
+        Write-Host "config.toml [agents] 冲突（fail-fast，任何修改前终止）："
+        Write-AgentsConflictReport $plan $desired
+        throw "[agents] config conflict——安装已在任何修改前终止；请调整 config.toml 后重试"
+    }
 }
 
 # 复制文件；目标存在时：SkipIfExists 绝不覆盖；OverwriteIfChanged 内容相同则跳过。
@@ -248,6 +415,8 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
     if ([string]::IsNullOrEmpty($ProjectPath) -or -not (Test-Path $ProjectPath)) {
         throw 'ProjectPath 不存在或未提供。'
     }
+    # preflight（任何 filesystem mutation 之前）：config.toml [agents] 冲突 → fail-fast
+    if (-not $DryRun) { Assert-AgentsPreflight (Join-Path $CodexHome 'config.toml') }
     # 全新环境：先确保 CODEX_HOME 目录存在（dry-run 不落任何文件）
     if (-not $DryRun) {
         if (-not (Test-Path $CodexHome)) { New-Item -ItemType Directory -Force $CodexHome | Out-Null }
