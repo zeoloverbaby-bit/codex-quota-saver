@@ -62,6 +62,7 @@ manifest_field() { # $1=line $2=field —— 与 do_uninstall 的解析口径一
     created_by_cqs) printf '%s' "$line" | sed -n 's/.*\bcreated_by_cqs=\([^[:space:]]*\).*/\1/p' ;;
     modified_by_cqs) printf '%s' "$line" | sed -n 's/.*\bmodified_by_cqs=\([^[:space:]]*\).*/\1/p' ;;
     installed_hash) printf '%s' "$line" | sed -n 's/.*\binstalled_hash=\([^[:space:]]*\).*/\1/p' ;;
+    installed_block_hash) printf '%s' "$line" | sed -n 's/.*\binstalled_block_hash=\([^[:space:]]*\).*/\1/p' ;;
     *) printf '' ;;
   esac
 }
@@ -136,15 +137,50 @@ trap on_exit_failure EXIT
 block_begin() { echo "<!-- cqs-managed-block:$1 begin -->"; }
 block_end()   { echo "<!-- cqs-managed-block:$1 end -->"; }
 
+block_body_hash() { # $1=file $2=begin $3=end → 块体 sha256（awk 行重建：content 末尾补一个 \n 的规范口径，
+  # 与写入格式 `printf '\n'; begin; cat content; end; printf '\n'` 的提取结果一致）
+  awk -v b="$2" -v e="$3" '!seen && index($0,b)>0 { seen=1; next } seen && index($0,e)>0 { exit } seen { print }' "$1" \
+    | sha256sum | cut -d' ' -f1
+}
+
+block_content_hash() { # $1=content-file → 与 block_body_hash 同口径：awk 行重建（末行同样补 \n）
+  awk '{print}' "$1" | sha256sum | cut -d' ' -f1
+}
+
 add_managed_block() { # $1=file $2=id $3=content-file
-  local prev="" pcreated="" pbackup=""
+  local prev="" pcreated="" pbackup="" pblockhash="" newhash=""
   prev="$(prev_line "$1")"
   [ -z "$prev" ] || pcreated="$(manifest_field "$prev" created_by_cqs)"
   [ -z "$prev" ] || pbackup="$(manifest_field "$prev" backup)"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
+  newhash="$(block_content_hash "$3")"
   if [ -f "$1" ] && grep -qF "$(block_begin "$2")" "$1"; then
-    log "skip (block present): $1"
-    # 生命周期幂等：旧 created/backup 保留（Rule A/B/E），绝不降级
-    manifest_add "append" "$1" "managed_block_id=$2" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$pbackup"
+    # 块已存在：按 installed_block_hash 区分 幂等 skip / 用户改过（不覆盖）/ 模板升级
+    local created=0 modified=1 ownership="user"
+    [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+    if [ -z "$pblockhash" ]; then
+      log "托管块 $2 存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$pbackup"
+      return
+    fi
+    if [ "$(block_body_hash "$1" "$(block_begin "$2")" "$(block_end "$2")")" != "$pblockhash" ]; then
+      log "托管块 $2 已被用户修改，保留不覆盖（如需升级请先手动处理该块）: $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    if [ "$newhash" = "$pblockhash" ]; then
+      log "skip (block present): $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    # 块体未被用户修改且模板已升级 → 替换块体（同一 txn：先快照后摘旧写新）
+    if [ "$MODE" = "--dry-run" ]; then log "dry-run block upgrade: $1"; return; fi
+    local txn=""
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    remove_managed_block "$1" "$2"
+    { printf '\n'; block_begin "$2"; cat "$3"; block_end "$2"; printf '\n'; } >> "$1"
+    manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newhash" "backup=$pbackup"
+    log "upgrade block: $1"
     return
   fi
   if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
@@ -165,7 +201,7 @@ add_managed_block() { # $1=file $2=id $3=content-file
     track_created "$1"
   fi
   { printf '\n'; block_begin "$2"; cat "$3"; block_end "$2"; printf '\n'; } >> "$1"
-  manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
+  manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newhash" "backup=$backup"
   log "append block: $1"
 }
 

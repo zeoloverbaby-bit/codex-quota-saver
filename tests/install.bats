@@ -334,6 +334,40 @@ stage_sources() { # $1=dir
   [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
 }
 
+@test "Managed Block Case G：用户内容 + 块 S1 → 模板升级 S2 → 块升级、卸载只剩用户内容" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA PROTOCOL V1\n' > "$TESTDIR/src/s1/global/AGENTS.md"
+  printf 'LUNA PROTOCOL V2\n' > "$TESTDIR/src/s2/global/AGENTS.md"
+  printf 'USER AGENTS\n' > "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'LUNA PROTOCOL V1' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep -q 'LUNA PROTOCOL V2' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  ! grep -q 'LUNA PROTOCOL V1' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  grep -q 'USER AGENTS' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  [ "$(grep -c 'cqs-managed-block:global-agents begin' "$CQS_TEST_CODEX_HOME/AGENTS.md")" -eq 1 ]
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+  grep 'AGENTS.md' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'installed_block_hash='
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  grep -q 'USER AGENTS' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  ! grep -q 'LUNA PROTOCOL' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+}
+
+@test "Managed Block Case H：用户编辑块内 → S2 尝试 → 不覆盖 + 明确报告" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA PROTOCOL V1\n' > "$TESTDIR/src/s1/global/AGENTS.md"
+  printf 'LUNA PROTOCOL V2\n' > "$TESTDIR/src/s2/global/AGENTS.md"
+  printf 'USER AGENTS\n' > "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  sed -i 's/LUNA PROTOCOL V1/USER EDIT INSIDE BLOCK/' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  grep -q 'USER EDIT INSIDE BLOCK' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  ! grep -q 'LUNA PROTOCOL V2' "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  echo "$output" | grep -q '已被用户修改'
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+}
+
 @test "Upgrade Case F：missing → S1 → 升级 S2 失败 → 恢复 S1 且 created_by_cqs 保持" {
   stage_sources "$TESTDIR/src"
   printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"

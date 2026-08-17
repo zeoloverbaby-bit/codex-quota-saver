@@ -22,6 +22,19 @@ function Get-SourceRoot {
 
 function Get-Timestamp { Get-Date -Format 'yyyyMMdd-HHmmss' }
 function Get-Sha256([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).Hash }
+function Get-StringSha256([string]$S) {
+    # 托管块体哈希：与 Get-ManagedBlockBody 提取口径对齐（UTF8 字节）
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($S)
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+    return ([System.BitConverter]::ToString($hash)).Replace('-', '')
+}
+function Get-ManagedBlockBody([string]$Raw, [string]$Begin, [string]$End) {
+    # begin/end 标记行之间的块体（与写入格式 "`n<begin>`n<Content>`n<end>`n" 对齐）；未找到→$null
+    $pattern = '(?ms)' + [regex]::Escape($Begin) + '\r?\n(?<body>.*?)\r?\n' + [regex]::Escape($End)
+    $m = [regex]::Match($Raw, $pattern)
+    if (-not $m.Success) { return $null }
+    return $m.Groups['body'].Value
+}
 function Get-ManifestPath([string]$CodexHome) { Join-Path $CodexHome '.codex-quota-saver-manifest.json' }
 function Get-UniqueBackupPath([string]$Dest) {
     # 备份名唯一化：同秒多次安装不覆盖既有备份（origin 只有第一份，Rule E）
@@ -65,6 +78,7 @@ function Merge-ManifestEntry($Prev, $New) {
     if (-not $New.backup -and $Prev.backup) { $New.backup = $Prev.backup }
     if (-not $New.installed_hash -and $Prev.installed_hash) { $New.installed_hash = $Prev.installed_hash }
     if (-not $New.managed_block_id -and $Prev.managed_block_id) { $New.managed_block_id = $Prev.managed_block_id }
+    if (-not $New.installed_block_hash -and $Prev.installed_block_hash) { $New.installed_block_hash = $Prev.installed_block_hash }
     return $New
 }
 
@@ -75,16 +89,43 @@ function Merge-ManifestEntry($Prev, $New) {
 function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$DryRun, $Prev) {
     $begin = "<!-- cqs-managed-block:$Id begin -->"
     $end   = "<!-- cqs-managed-block:$Id end -->"
+    # 块体哈希必须与「写入后从文件提取」的字节一致：把合成块串喂给同一提取函数，
+    # 避免模板行尾（LF/CRLF）造成写时哈希与重装时提取哈希不一致。
+    $contentHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin`n$Content`n$end`n" $begin $end)
+    $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
     $existed = Test-Path $Path
     if ($existed) {
         $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
         if ($raw.Contains($begin)) {
-            return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-present';managed_block_id=$Id;ownership='user';created_by_cqs=$false;modified_by_cqs=$true})
+            # 块已存在：按 installed_block_hash 区分 幂等 skip / 用户改过（不覆盖）/ 模板升级
+            $ownership = 'cqs'; $created = $true; $modified = $false
+            if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+            $prevHash = $null
+            if ($null -ne $Prev -and $Prev.installed_block_hash) { $prevHash = [string]$Prev.installed_block_hash }
+            if ($null -eq $prevHash) {
+                Write-Host "托管块 $Id 存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $Path"
+                return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-unverified';managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified})
+            }
+            $body = Get-ManagedBlockBody $raw $begin $end
+            if ($null -eq $body -or (Get-StringSha256 $body) -ne $prevHash) {
+                Write-Host "托管块 $Id 已被用户修改，保留不覆盖（如需升级请先手动处理该块）: $Path"
+                return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-user-modified';managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified})
+            }
+            if ($contentHash -eq $prevHash) {
+                return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-present';managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified})
+            }
+            # 块体未被用户修改且模板已升级 → 替换块体（同一 txn：先快照后摘旧写新）
+            if ($DryRun) { Write-Host "dry-run: 将升级托管块 ${Id}: $Path"; return @{action='skip';dest=$Path;dry=$true;reason='block-upgrade'} }
+            $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+            Remove-ManagedBlock -Path $Path -Id $Id -Begin $begin -End $end | Out-Null
+            Add-Content -Path $Path -Value "`n$begin`n$Content`n$end`n" -Encoding UTF8
+            $backup = $null
+            if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
+            return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$contentHash;created_this_run=$false;backup_created_this_run=$false;txn_backup_this_run=$txnBackup})
         }
     }
     $block = "`n$begin`n$Content`n$end`n"
     if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
-    $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
     $backup = $null
     $backupCreatedThisRun = $false
     $txnBackup = $null
@@ -101,7 +142,7 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
     Add-Content -Path $Path -Value $block -Encoding UTF8
     $ownership = 'cqs'; $created = $true; $modified = $false
     if ($existed -and -not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
-    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
+    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$contentHash;created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
 }
 
 # 按标记精确移除托管块；无块则跳过。begin/end 可自定义（TOML 段用 # 注释标记）

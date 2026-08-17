@@ -441,6 +441,81 @@ Describe 'Cross-version upgrade（S1→S2/S3 生命周期）' {
     }
 }
 
+# ---- Managed block 版本升级（installed_block_hash）：块体未被用户修改才可升级 ----
+Describe 'Managed block 版本升级（installed_block_hash）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        function New-SourceStage([string]$Root, [string]$Name) {
+            $s = Join-Path $Root $Name
+            Copy-Item (Join-Path $repoRoot 'global') (Join-Path $s 'global') -Recurse
+            Copy-Item (Join-Path $repoRoot 'project') (Join-Path $s 'project') -Recurse
+            return $s
+        }
+        function Copy-SourceStage([string]$Src, [string]$DstRoot, [string]$Name) {
+            $d = Join-Path $DstRoot $Name
+            Copy-Item "$Src\global" "$d\global" -Recurse
+            Copy-Item "$Src\project" "$d\project" -Recurse
+            return $d
+        }
+        function Invoke-WithSource([string]$Source, [scriptblock]$Body) {
+            $env:CQS_TEST_SOURCE_ROOT = $Source
+            try { & $Body } finally { Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'Case G：用户内容 + CQS 块 S1 → 模板升级 S2 → 块升级、用户内容不变、卸载只剩用户内容' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-g"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s1 'global\AGENTS.md') -Value 'LUNA PROTOCOL V1' -Encoding UTF8
+        Set-Content (Join-Path $s2 'global\AGENTS.md') -Value 'LUNA PROTOCOL V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-mb-g'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $f = Join-Path $codex 'AGENTS.md'
+        Set-Content $f -Value 'USER AGENTS' -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-mb-g')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        "$(Get-Content $f -Raw -Encoding UTF8)" | Should -Match 'LUNA PROTOCOL V1'
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $raw = "$(Get-Content $f -Raw -Encoding UTF8)"
+        $raw | Should -Match 'LUNA PROTOCOL V2'
+        $raw | Should -Not -Match 'LUNA PROTOCOL V1'
+        $raw | Should -Match 'USER AGENTS'
+        ([regex]::Matches($raw, [regex]::Escape('<!-- cqs-managed-block:global-agents begin -->'))).Count | Should -Be 1
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $f }
+        $e.installed_block_hash | Should -Not -BeNullOrEmpty
+        Invoke-Main -Uninstall -CodexHome $codex
+        "$(Get-Content $f -Raw -Encoding UTF8)".Trim() | Should -Be 'USER AGENTS'
+    }
+
+    It 'Case H：用户编辑块内 → S2 尝试 → 不覆盖 + block-user-modified' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-h"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s1 'global\AGENTS.md') -Value 'LUNA PROTOCOL V1' -Encoding UTF8
+        Set-Content (Join-Path $s2 'global\AGENTS.md') -Value 'LUNA PROTOCOL V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-mb-h'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $f = Join-Path $codex 'AGENTS.md'
+        Set-Content $f -Value 'USER AGENTS' -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-mb-h')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        # 用户编辑块内（保留 markers）
+        $edited = "$(Get-Content $f -Raw -Encoding UTF8)".Replace('LUNA PROTOCOL V1', 'USER EDIT INSIDE BLOCK')
+        Set-Content $f -Value $edited -Encoding UTF8
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $raw = "$(Get-Content $f -Raw -Encoding UTF8)"
+        $raw | Should -Match 'USER EDIT INSIDE BLOCK'
+        $raw | Should -Not -Match 'LUNA PROTOCOL V2'
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $f }
+        $e.reason | Should -Be 'block-user-modified'
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        Invoke-Main -Uninstall -CodexHome $codex
+        "$(Get-Content $f -Raw -Encoding UTF8)".Trim() | Should -Be 'USER AGENTS'
+    }
+}
+
 Describe 'partial failure：中途失败不丢旧 manifest、已改资源回滚、绝不打印成功' {
     It '第 3 步注入失败：抛错、旧 manifest 字节不变、本轮改动回滚（Pester）' {
         $codex = "$TestDrive/codex-fail"
