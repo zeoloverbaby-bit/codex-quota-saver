@@ -36,7 +36,8 @@ manifest_add() {
 }
 
 unique_backup_path() { # $1=dest —— 同秒冲突防护：绝不覆盖既有备份（origin 只有第一份）
-  local base="$1.bak-$(date +%Y%m%d-%H%M%S)" i=1
+  local base i=1
+  base="$1.bak-$(date +%Y%m%d-%H%M%S)"
   [ -e "$base" ] || { echo "$base"; return; }
   while [ -e "$base-$i" ]; do i=$((i+1)); done
   echo "$base-$i"
@@ -257,7 +258,7 @@ merge_agents_toml() { # $1=file —— key 级 reconciliation
     return
   fi
   # 表存在：逐 key 分类（reconcile plan）
-  local k d c st conflicts=0 addlines="" stricters=0
+  local k d c st conflicts=0 addlines=""
   while IFS=$'\t' read -r k d; do
     c="$(agents_span_value "$1" "$k" || true)"
     st="$(agents_classify "$k" "$d" "$c")"
