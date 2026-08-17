@@ -23,6 +23,8 @@ MANIFEST="$CODEX_HOME/.codex-quota-saver-manifest"
 MANIFEST_JOURNAL="$MANIFEST.tmp"
 
 log() { echo "[cqs] $*"; }
+# 测试/排障专用跟踪（默认关闭；CQS_TEST_DEBUG=1 时输出 reconcile 内部状态）
+cqs_debug() { [ -n "${CQS_TEST_DEBUG:-}" ] && log "DEBUG: $*"; }
 
 # manifest 行式格式: action<TAB>dest<TAB>key=value 空格分隔（显式 TAB 连接，$* 会用 IFS 首字符=空格）
 # dry-run 下为 no-op（dry-run 必须零落盘；skip 条目只属于真实安装）
@@ -148,30 +150,27 @@ remove_managed_block() { # $1=file $2=id [$3=begin $4=end]（默认 HTML 注释�
 # 四态：missing→ADD / 相同→ADOPT / 更严但满足不变量→ADOPT_STRICTER / 破坏不变量→CONFLICT。
 # 期望值运行时读自 global/config-agents.toml（source of truth）；冲突 = fail-fast
 # （preflight 在任何 mutation 前终止）；文本补丁只在现有表头后插 markers+缺失 keys。
-agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号）
-  local f="$REPO_ROOT/global/config-agents.toml" inagents=0 line k v
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$inagents" = "0" ]; then
-      case "$line" in
-        [[:space:]]*\[agents\][[:space:]]*) inagents=1 ;;
-      esac
-      continue
-    fi
-    case "$line" in
-      ""|\#*) continue ;;
-      [[:space:]]*\[*) return 0 ;;
-    esac
-    k="${line%%=*}"; k="${k# }"; k="${k% }"
-    if [[ "$k" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-      v="${line#*=}"; v="${v# }"; v="${v% }"
-      printf '%s\t%s\n' "$k" "$v"
-    fi
-  done < "$f"
+agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号；先剥 CR 再解析——防 CRLF 破坏行处理）
+  tr -d '\r' < "$REPO_ROOT/global/config-agents.toml" | awk '
+    /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ { inagents=1; next }
+    inagents && /^[[:space:]]*\[/ { exit }
+    inagents && /^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=/ {
+      sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*=/, "\t"); sub(/[[:space:]]*$/, "")
+      print
+    }
+  '
+}
+
+agents_span() { # $1=file —— [agents] 表头之后的 span 行（到下一表头为止；剥 CR）
+  tr -d '\r' < "$1" | awk '
+    /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ { inagents=1; next }
+    inagents && /^[[:space:]]*\[/ { exit }
+    inagents { print }
+  '
 }
 
 agents_span_value() { # $1=file $2=key → [agents] span 内该 key 的原始值；未找到→空
-  sed -n '/^[[:space:]]*\[agents\][[:space:]]*\(#.*\)*$/,/^[[:space:]]*\[/p' "$1" \
-    | grep -E "^[[:space:]]*$2[[:space:]]*=" | head -n 1 \
+  agents_span "$1" | grep -E "^[[:space:]]*$2[[:space:]]*=" | head -n 1 \
     | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*#[^"]*$//' | sed 's/[[:space:]]*$//'
 }
 
@@ -209,10 +208,12 @@ agents_key_impact() {
 }
 
 agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析 → exit 1
-  local f="$1" k d c st conflicts=0
+  local f="$1" k d c st conflicts=0 desired=""
   [ -f "$f" ] || return 0
   grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$f" || return 0
+  desired="$(agents_desired || true)"
   while IFS=$'\t' read -r k d; do
+    [ -n "$k" ] || continue
     c="$(agents_span_value "$f" "$k" || true)"
     st="$(agents_classify "$k" "$d" "$c")"
     case "$st" in
@@ -224,7 +225,9 @@ agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前�
         log "  Impact: $(agents_key_impact "$k")"
         ;;
     esac
-  done < <(agents_desired)
+  done <<EOF
+$desired
+EOF
   if [ "$conflicts" = "1" ]; then
     log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast，任何修改前终止）。"
     exit 1
@@ -250,7 +253,14 @@ merge_agents_toml() { # $1=file —— key 级 reconciliation
     fi
     {
       printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
-      while IFS=$'\t' read -r k d; do printf '%s = %s\n' "$k" "$d"; done < <(agents_desired)
+      local desired=""
+      desired="$(agents_desired || true)"
+      while IFS=$'\t' read -r k d; do
+        [ -n "$k" ] || continue
+        printf '%s = %s\n' "$k" "$d"
+      done <<EOF
+$desired
+EOF
       printf '%s\n' "$end"
     } >> "$1"
     manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
@@ -258,10 +268,14 @@ merge_agents_toml() { # $1=file —— key 级 reconciliation
     return
   fi
   # 表存在：逐 key 分类（reconcile plan）
-  local k d c st conflicts=0 addlines=""
+  local k d c st conflicts=0 addlines="" desired=""
+  desired="$(agents_desired || true)"
+  cqs_debug "desired=[$(printf '%s' "$desired" | tr '\n' '|')]"
   while IFS=$'\t' read -r k d; do
+    [ -n "$k" ] || continue
     c="$(agents_span_value "$1" "$k" || true)"
     st="$(agents_classify "$k" "$d" "$c")"
+    cqs_debug "key=[$k] desired=[$d] current=[$c] state=[$st]"
     case "$st" in
       manual)
         log "config.toml [agents] 段含无法可靠解析的内容，跳过自动修改（fail-safe），请人工处理: $1"
@@ -280,7 +294,9 @@ $k = $d" ;;
       adopt) : ;;
       adopt_stricter) log "已采纳用户更严值 [agents].$k = $c（满足 CQS 不变量，不覆盖）" ;;
     esac
-  done < <(agents_desired)
+  done <<EOF
+$desired
+EOF
   if [ "$MODE" = "--dry-run" ]; then log "dry-run reconcile plan: $1（详见上方冲突/采纳输出）"; return; fi
   if [ "$conflicts" = "1" ]; then
     log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast）。"
@@ -442,6 +458,8 @@ maybe_fail 6
 install_file "$REPO_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1
 maybe_fail 7
 
-# 提交点：全部步骤成功后原子替换旧 manifest
-mv -f "$MANIFEST_JOURNAL" "$MANIFEST"
+# 提交点：全部步骤成功后原子替换旧 manifest（dry-run 无 journal，跳过提交）
+if [ "$MODE" = "install" ]; then
+  mv -f "$MANIFEST_JOURNAL" "$MANIFEST"
+fi
 log "安装完成（mode=$MODE）。"
