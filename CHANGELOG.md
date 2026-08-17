@@ -4,8 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+- docs/pitfalls.md：新增坑 16-19（桥加固期：NUL env 窗口消失 / ACL 执行位 / 421 DNS-rebinding / ngrok 拦截页）；排坑表 15 → 19 坑，README 计数同步
+
 ### Changed
 - README：部署第 3 步与「已知问题」清单补充 ngrok 免费版拦截页说明（无法技术跳过、点一次 Visit Site、v1.6.4 起启动器自动预热）
+- README：Status 行同步稳定 Gate 进度（五道已过四道，仅剩 A/B 评测数据产出）
+- README：第 3 步措辞 v1.6.x 化（「捕获连接器参数」→「自动注册连接器（DCR，无需捕获任何参数）」）
+- docs/pitfalls.md：坑 4/10/11 标注 v1.6.0 已根治（oauth_state.json 落盘）；自救清单密码位置改为 `.secrets.local.env`
 
 ### Removed
 - bridge/start-bridge.bat / bridge/start-bridge.sh：v1.1-1.5 时代旧模板（手工填占位符 + 上游直连 `--oauth-mode`）。已被 setup 生成的 `start-bridge.local.*` 完全取代且全仓库零引用——删除以保持「启动器唯一权威来源 = setup」
