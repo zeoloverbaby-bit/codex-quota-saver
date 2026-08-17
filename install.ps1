@@ -91,7 +91,7 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
     $end   = "<!-- cqs-managed-block:$Id end -->"
     # 块体哈希必须与「写入后从文件提取」的字节一致：把合成块串喂给同一提取函数，
     # 避免模板行尾（LF/CRLF）造成写时哈希与重装时提取哈希不一致。
-    $contentHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin`n$Content`n$end`n" $begin $end)
+    $contentHash = Get-StringSha256 (Get-ManagedBlockBody -Raw "`n$begin`n$Content`n$end`n" -Begin $begin -End $end)
     $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
     $existed = Test-Path $Path
     if ($existed) {
@@ -106,7 +106,7 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
                 Write-Host "托管块 $Id 存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $Path"
                 return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-unverified';managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified})
             }
-            $body = Get-ManagedBlockBody $raw $begin $end
+            $body = Get-ManagedBlockBody -Raw $raw -Begin $begin -End $end
             if ($null -eq $body -or (Get-StringSha256 $body) -ne $prevHash) {
                 Write-Host "托管块 $Id 已被用户修改，保留不覆盖（如需升级请先手动处理该块）: $Path"
                 return (Merge-ManifestEntry $Prev @{action='skip';dest=$Path;reason='block-user-modified';managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified})
@@ -262,7 +262,7 @@ function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired, [string]$Pre
             }
         }
         if ($plan.markers_exist) {
-            $body = Get-ManagedBlockBody $Raw $begin $end
+            $body = Get-ManagedBlockBody -Raw $Raw -Begin $begin -End $end
             if ($null -eq $body) { $plan.writer_supported = $false } else { $plan.region_hash = Get-StringSha256 $body }
         }
     }
@@ -303,16 +303,16 @@ function Get-AgentsReconcilePlan([string]$Raw, [hashtable]$Desired, [string]$Pre
             $plan.region_modified = $true
         } else {
             $regionKeysDesired = @($Desired.Keys | Where-Object { -not $plan.current.ContainsKey($_) })
-            $bodyRaw = Get-ManagedBlockBody $Raw $begin $end
+            $bodyRaw = Get-ManagedBlockBody -Raw $Raw -Begin $begin -End $end
             $whole = ($null -ne $bodyRaw -and $bodyRaw.TrimStart().StartsWith('[agents]'))
             $nl = $plan.nl
             $newHash = $null
             if ($whole) {
                 $keysText = (($regionKeysDesired | ForEach-Object { "$_ = $($Desired[$_].raw)" }) -join "`n")
-                $newHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin`n[agents]`n$keysText`n$end`n" $begin $end)
+                $newHash = Get-StringSha256 (Get-ManagedBlockBody -Raw "`n$begin`n[agents]`n$keysText`n$end`n" -Begin $begin -End $end)
             } else {
                 $regionText = (($regionKeysDesired | ForEach-Object { "$_ = $($Desired[$_].raw)" }) -join $nl)
-                $newHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+                $newHash = Get-StringSha256 (Get-ManagedBlockBody -Raw "`n$begin$nl$regionText$nl$end`n" -Begin $begin -End $end)
             }
             if ($null -eq $newHash -or $newHash -ne $plan.region_hash) { $plan.region_upgrade = $true }
         }
@@ -367,7 +367,7 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
         if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
         $block = New-AgentsManagedBlock $desired
         Add-Content -Path $Path -Value $block -Encoding UTF8
-        $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+        $regionHash = Get-StringSha256 (Get-ManagedBlockBody -Raw $block -Begin $begin -End $end)
         return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$null;managed_block_id='agents-toml';ownership='cqs';created_by_cqs=$true;modified_by_cqs=$false;installed_block_hash=$regionHash;created_this_run=$true;backup_created_this_run=$false})
     }
     $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
@@ -386,7 +386,7 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
         }
         $block = New-AgentsManagedBlock $desired
         Add-Content -Path $Path -Value $block -Encoding UTF8
-        $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+        $regionHash = Get-StringSha256 (Get-ManagedBlockBody -Raw $block -Begin $begin -End $end)
         $ownership = 'cqs'; $created = $true; $modified = $false
         if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
         return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
@@ -450,13 +450,13 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
             }
             Set-Content -Path $Path -Value ($newLines -join $nl) -Encoding UTF8
             $regionText = (($regionKeysDesired | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join $nl)
-            $regionHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+            $regionHash = Get-StringSha256 (Get-ManagedBlockBody -Raw "`n$begin$nl$regionText$nl$end`n" -Begin $begin -End $end)
         } else {
             # 整文件形状（region 内含 [agents] 表头）：整块重建（LF，与 New-AgentsManagedBlock 一致）
             $keysText = (($regionKeysDesired | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join "`n")
             $block = "`n$begin`n[agents]`n$keysText`n$end`n"
             Add-Content -Path $Path -Value $block -Encoding UTF8
-            $regionHash = Get-StringSha256 (Get-ManagedBlockBody $block $begin $end)
+            $regionHash = Get-StringSha256 (Get-ManagedBlockBody -Raw $block -Begin $begin -End $end)
         }
         return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$false;txn_backup_this_run=$txnBackup})
     }
@@ -492,7 +492,7 @@ function Merge-AgentsToml([string]$Path, [bool]$DryRun, $Prev) {
     }
     Set-Content -Path $Path -Value ($newLines -join $nl) -Encoding UTF8
     $regionText = (($addKeys | ForEach-Object { "$_ = $($desired[$_].raw)" }) -join $nl)
-    $regionHash = Get-StringSha256 (Get-ManagedBlockBody "`n$begin$nl$regionText$nl$end`n" $begin $end)
+    $regionHash = Get-StringSha256 (Get-ManagedBlockBody -Raw "`n$begin$nl$regionText$nl$end`n" -Begin $begin -End $end)
     $ownership = 'cqs'; $created = $true; $modified = $false
     if (-not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
     return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;installed_block_hash=$regionHash;created_this_run=$false;backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
