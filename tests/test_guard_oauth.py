@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import os
 import secrets
+import stat
 import sys
 import time
 from pathlib import Path
@@ -417,3 +418,16 @@ def test_mcp_via_public_host_allowed(tmp_path):
                         assert tools == {"read_file", "write_next_step"}
 
     asyncio.run(scenario())
+
+
+def test_state_dir_and_file_restrictive_modes_posix(tmp_path):
+    """OAuth state 落盘权限边界（POSIX）：state 目录 0700、state 文件 0600。
+    Windows 的 ACL 由 bridge/setup.* 收紧（Pester 侧验证继承移除），os.chmod 对 ACL 无效。
+    state 目录/文件含 token_secret + 客户端注册表——其他用户不可读写。"""
+    if os.name == "nt":
+        pytest.skip("POSIX-only mode bits; Windows ACL covered by Pester tests")
+    state_path = str(tmp_path / "guard" / "state" / "oauth_state.json")
+    oauth_provider.GuardOAuthProvider(
+        state_path=state_path, issuer=ISSUER, resource_url=RESOURCE, password_env=PASSWORD_ENV)
+    assert stat.S_IMODE(os.stat(state_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(os.path.dirname(state_path)).st_mode) == 0o700

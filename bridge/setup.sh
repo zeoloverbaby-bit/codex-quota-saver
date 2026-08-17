@@ -15,7 +15,9 @@ DOMAIN="${DOMAIN%/}"
 BRIDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$BRIDGE_DIR/.secrets.local.env"
 GUARD_CONF="$BRIDGE_DIR/guard/guard_config.json"
-OAUTH_STATE="$BRIDGE_DIR/guard/oauth_state.json"
+OAUTH_STATE_DIR="$BRIDGE_DIR/guard/state"
+OAUTH_STATE="$OAUTH_STATE_DIR/oauth_state.json"
+LEGACY_OAUTH_STATE="$BRIDGE_DIR/guard/oauth_state.json"
 LAUNCHER="$BRIDGE_DIR/start-bridge.local.sh"
 GUARD_PORT=8766; UPSTREAM_PORT=8765
 
@@ -40,6 +42,7 @@ fi
 
 if [ "$MODE" = "--dry-run" ]; then
   echo "[dry-run] 将生成 $ENV_FILE / $GUARD_CONF / $LAUNCHER（密码随机，token 随机）"
+  echo "[dry-run] 状态目录 $OAUTH_STATE_DIR（chmod 700，仅当前用户）"
   echo "[dry-run] 运行时生成 $OAUTH_STATE（token_secret + 客户端注册表，重启免疫）"
   echo "[dry-run] 依赖：coding-tools-mcp==0.3.0 + guard venv（mcp==2.0.0 + pyjwt==2.13.0）+ ngrok 3.39.11"
   exit 0
@@ -67,6 +70,16 @@ chmod 600 "$ENV_FILE"
 # shellcheck disable=SC2086  # $ALLOWLIST 故意的分词（拆成 JSON 数组元素）
 ALLOWLIST_JSON=$(printf '"%s", ' $ALLOWLIST | sed 's/, $//')
 
+# OAuth state 目录：先建目录并收紧（0700），运行时生成的状态文件只对当前用户可读写；
+# 旧路径 oauth_state.json 自动迁移到 state/（授权不失效）
+mkdir -p "$OAUTH_STATE_DIR"
+chmod 700 "$OAUTH_STATE_DIR"
+if [ -f "$LEGACY_OAUTH_STATE" ] && [ ! -f "$OAUTH_STATE" ]; then
+  mv "$LEGACY_OAUTH_STATE" "$OAUTH_STATE"
+  chmod 600 "$OAUTH_STATE"
+  echo "已迁移旧 OAuth 状态到 guard/state/（授权依然有效，无需重新授权）。"
+fi
+
 cat > "$GUARD_CONF" <<EOF
 {
   "host": "127.0.0.1", "port": $GUARD_PORT,
@@ -75,7 +88,7 @@ cat > "$GUARD_CONF" <<EOF
   "public_url": "https://$DOMAIN",
   "upstream_token_env": "CQS_UPSTREAM_TOKEN",
   "oauth_password_env": "CQS_OAUTH_PASSWORD",
-  "oauth_state_file": "oauth_state.json",
+  "oauth_state_file": "state/oauth_state.json",
   "allowlist": [$ALLOWLIST_JSON]
 }
 EOF

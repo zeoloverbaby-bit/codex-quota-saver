@@ -90,7 +90,14 @@ class GuardOAuthProvider:
                 self._clients[cid] = OAuthClientInformationFull.model_validate(cjson)
 
     def _save_state(self):
-        os.makedirs(os.path.dirname(self._state_path) or ".", exist_ok=True)
+        state_dir = os.path.dirname(self._state_path) or "."
+        os.makedirs(state_dir, exist_ok=True)
+        try:
+            # POSIX：state 目录 owner-only（0700）——含 token_secret + 客户端注册表。
+            # Windows 目录 ACL 由 bridge/setup.* 收紧（os.chmod 对 ACL 无效，此处只兜底 POSIX）
+            os.chmod(state_dir, 0o700)
+        except OSError:  # pragma: no cover
+            pass
         data = {
             "token_secret": self._secret,
             "clients": {cid: json.loads(c.model_dump_json()) for cid, c in self._clients.items()},

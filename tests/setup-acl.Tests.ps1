@@ -114,3 +114,41 @@ Describe 'Secrets 生成（防越界 NUL）' {
         (New-Token) -match '^[0-9a-f]{64}$' | Should -BeTrue
     }
 }
+
+Describe 'OAuth state 目录权限（token_secret + 客户端注册表落盘处，Windows 继承已移除）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        . "$repoRoot/bridge/acl.ps1"
+        $setupSource = Get-Content "$repoRoot/bridge/setup.ps1" -Raw -Encoding UTF8
+        $shSource = Get-Content "$repoRoot/bridge/setup.sh" -Raw -Encoding UTF8
+        $who = whoami
+    }
+    It 'Tighten-Acl 用于目录：继承移除，且其后新建的子文件 ACL 只含当前用户（无 broad ACE）' {
+        $dir = New-Item -ItemType Directory "$TestDrive/state-dir"
+        Tighten-Acl -Path $dir.FullName -Rights '(R,W)'
+        $acl = Get-Acl $dir.FullName
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $child = New-Item -ItemType File "$($dir.FullName)/child.json"
+        $childAcl = Get-Acl $child.FullName
+        # 不是 world-readable 等价状态：无 Everyone / Users / Authenticated Users
+        $broad = $childAcl.Access | Where-Object { $_.IdentityReference.Value -match 'Everyone|BUILTIN\\Users|Authenticated Users' }
+        $broad.Count | Should -Be 0
+        # 当前用户仍可读写
+        $mine = $childAcl.Access | Where-Object { $_.IdentityReference.Value -eq $who }
+        $mine | Should -Not -BeNullOrEmpty
+        (($mine.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) | Should -BeTrue
+        (($mine.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) | Should -BeTrue
+    }
+    It 'setup.ps1 建 guard\state 目录并收紧 ACL、旧 oauth_state.json 迁移、配置指向 state/' {
+        $setupSource -match 'guard\\state' | Should -BeTrue
+        $setupSource -match 'Tighten-Acl \$StateDir' | Should -BeTrue
+        $setupSource -match 'Move-Item \$LegacyOAuthState' | Should -BeTrue
+        $setupSource -match 'state/oauth_state\.json' | Should -BeTrue
+    }
+    It 'setup.sh 建 state 目录 chmod 700、迁移旧状态、配置指向 state/' {
+        $shSource -match 'OAUTH_STATE_DIR=' | Should -BeTrue
+        $shSource -match 'chmod 700 "\$OAUTH_STATE_DIR"' | Should -BeTrue
+        $shSource -match 'mv "\$LEGACY_OAUTH_STATE"' | Should -BeTrue
+        $shSource -match 'state/oauth_state\.json' | Should -BeTrue
+    }
+}
