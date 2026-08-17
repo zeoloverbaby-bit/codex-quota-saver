@@ -18,6 +18,7 @@ import httpx2
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bridge", "guard"))
+import guard  # noqa: E402
 import guard_lib  # noqa: E402
 import oauth_provider  # noqa: E402
 
@@ -32,6 +33,8 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool  # noqa
 
 ISSUER = "http://localhost:8766"
 RESOURCE = "http://localhost:8766/mcp"
+PUBLIC_ISSUER = "https://public.example.com"
+PUBLIC_RESOURCE = "https://public.example.com/mcp"
 PASSWORD_ENV = "CQS_TEST_OAUTH_PASSWORD"
 PASSWORD = "hunter2-test"
 CALLBACK = "http://localhost:3000/callback"
@@ -315,5 +318,102 @@ def test_provider_code_single_use_and_refresh_unsupported(tmp_path):
         assert await p.load_refresh_token(client, "whatever") is None
         with pytest.raises(Exception):
             await p.exchange_refresh_token(client, "whatever", [])
+
+    asyncio.run(scenario())
+
+
+def test_build_transport_security_allows_public_host():
+    """guard.build_transport_security：公网域名 + 回环放行，其他 Host 421，POST 非 JSON 400。
+    2026-08-17 现场：SDK 自动只放行回环 Host，公网 Host 全被 421 拒。"""
+    async def scenario():
+        from starlette.requests import Request
+
+        from mcp.server.transport_security import TransportSecurityMiddleware
+
+        ts = guard.build_transport_security(PUBLIC_ISSUER)
+        assert ts.enable_dns_rebinding_protection is True
+        assert "public.example.com" in ts.allowed_hosts
+        assert "public.example.com:*" in ts.allowed_hosts
+
+        mw = TransportSecurityMiddleware(ts)
+
+        def make_request(host, content_type="application/json"):
+            return Request({"type": "http", "headers": [
+                (b"host", host.encode()), (b"content-type", content_type.encode()),
+            ]})
+
+        assert await mw.validate_request(make_request("public.example.com"), is_post=True) is None
+        assert await mw.validate_request(make_request("public.example.com:443"), is_post=True) is None
+        assert await mw.validate_request(make_request("127.0.0.1:8766"), is_post=True) is None
+        evil = await mw.validate_request(make_request("evil.example.com"), is_post=True)
+        assert evil is not None and evil.status_code == 421
+        bad_ct = await mw.validate_request(make_request("public.example.com", "text/plain"), is_post=True)
+        assert bad_ct is not None and bad_ct.status_code == 400
+
+    asyncio.run(scenario())
+
+
+@contextlib.asynccontextmanager
+async def _http_guard_public(tmp_path):
+    """guard.py 现场接线复刻：host=localhost + 显式 transport_security（放行公网域名）。
+    经 ASGITransport 以 PUBLIC_ISSUER 为 base_url → scope 的 Host 头是公网域名。"""
+    os.environ[PASSWORD_ENV] = PASSWORD
+    state_path = str(tmp_path / "state" / "oauth_state.json")
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        fake = await _fake_upstream()
+        fake_task = asyncio.create_task(fake.run(*server_streams, fake.create_initialization_options()))
+        async with ClientSession(*client_streams) as upstream:
+            await upstream.initialize()
+            guard_app = guard_lib.make_guard(upstream, allowlist={"read_file"}, workspace=str(tmp_path))
+            provider = oauth_provider.GuardOAuthProvider(
+                state_path=state_path, issuer=PUBLIC_ISSUER, resource_url=PUBLIC_RESOURCE,
+                password_env=PASSWORD_ENV)
+            auth = AuthSettings(issuer_url=PUBLIC_ISSUER, resource_server_url=PUBLIC_RESOURCE)
+            app = guard_app.streamable_http_app(
+                streamable_http_path="/mcp",
+                host="localhost",
+                token_verifier=ProviderTokenVerifier(provider),
+                auth=auth,
+                custom_starlette_routes=(
+                    oauth_provider.create_guard_auth_routes(
+                        provider, PUBLIC_ISSUER, ClientRegistrationOptions(enabled=True))
+                    + oauth_provider.create_login_routes(provider)
+                ),
+                transport_security=guard.build_transport_security(PUBLIC_ISSUER),
+            )
+            async with _run_lifespan(app):
+                yield app, provider
+        fake_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await fake_task
+
+
+def test_mcp_via_public_host_allowed(tmp_path):
+    """回归：公网 Host 下完整 OAuth + MCP 流程必须走通。
+    不修复时 /mcp 会被 SDK 默认的 DNS-rebinding 防护 421 拒绝（现场：ChatGPT 连接器
+    /token 200 后 /mcp 全 421「Invalid Host header」，工具列表为空）。"""
+    async def scenario():
+        async with _http_guard_public(tmp_path) as (app, provider):
+            transport = httpx2.ASGITransport(app=app)
+            async with httpx2.AsyncClient(transport=transport, base_url=PUBLIC_ISSUER) as http:
+                r = await http.post("/register", json={
+                    "redirect_uris": [CALLBACK],
+                    "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["code"],
+                    "client_name": "pytest-public-host",
+                })
+                assert r.status_code == 201, r.text
+                client_id = r.json()["client_id"]
+                verifier, challenge = _pkce()
+                token = await _do_oauth_flow(http, client_id, verifier, challenge, PASSWORD)
+                mcp_http = httpx2.AsyncClient(
+                    transport=transport, headers={"Authorization": f"Bearer {token}"})
+                async with streamable_http_client(PUBLIC_RESOURCE, http_client=mcp_http) as streams:
+                    r_stream, w_stream = streams
+                    async with ClientSession(r_stream, w_stream) as c:
+                        await c.initialize()
+                        tools = {t.name for t in (await c.list_tools()).tools}
+                        assert tools == {"read_file", "write_next_step"}
 
     asyncio.run(scenario())

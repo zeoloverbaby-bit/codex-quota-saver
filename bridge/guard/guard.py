@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+from urllib.parse import urlparse
 
 import uvicorn
 from pydantic import AnyHttpUrl
@@ -19,6 +20,7 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import httpx2, streamable_http_client
 from mcp.server.auth.provider import ProviderTokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.server.transport_security import TransportSecuritySettings
 
 from guard_lib import make_guard
 from oauth_provider import GuardOAuthProvider, create_guard_auth_routes, create_login_routes
@@ -27,6 +29,19 @@ REQUIRED_KEYS = (
     "workspace", "upstream_url", "upstream_token_env", "public_url",
     "oauth_password_env", "oauth_state_file", "allowlist",
 )
+
+
+def build_transport_security(public_url: str) -> TransportSecuritySettings:
+    """guard /mcp 端点的 DNS-rebinding 防护：放行公网域名（ngrok 转发后 Host 是公网域名），
+    同时保留本机回环（本地诊断/直连）。
+    2026-08-17 现场教训：SDK 在 host 为 localhost 时会自动只放行回环 Host——不显式传入，
+    经 ngrok 的请求（Host=公网域名）全部 421「Invalid Host header」：ChatGPT 连接器
+    /token 已成功但 /mcp 全被拒，工具列表为空。"""
+    public_host = urlparse(public_url).hostname or "127.0.0.1"
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[public_host, f"{public_host}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
+    )
 
 
 def load_config(path: str) -> dict:
@@ -81,6 +96,7 @@ async def serve_once(cfg: dict, host: str, port: int, config_dir: str) -> None:
                     create_guard_auth_routes(provider, issuer, ClientRegistrationOptions(enabled=True))
                     + create_login_routes(provider)
                 ),
+                transport_security=build_transport_security(public_url),
                 debug=debug,
             )
             # uvicorn.run 是同步入口；在已有事件循环内必须用 async Server.serve()
