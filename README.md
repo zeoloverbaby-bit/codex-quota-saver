@@ -4,7 +4,7 @@
 
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。** 两个浪费源：**档位浪费**（规划、机械活烧着最贵的 Sol）与**过度治理**（本应在任务内自动收敛的工程问题，被错误升级成人工 Gate、全量重验——每一轮无谓的 STOP 都在烧最贵的 token 和你的注意力）。
 
-这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加 19 个实测坑的排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
+这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加实测排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
 
 ## 它解决什么（两个痛点，一份方案）
 
@@ -55,7 +55,7 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | `COMPATIBILITY.md` | 兼容性矩阵 + 版本 pin | 今天能跑 → clone 后也能跑 |
 | `SECURITY.md` | 安全边界与免责声明 | 部署前必读 |
 | `CHANGELOG.md` | 版本历史 | 判断要不要升级 |
-| `docs/pitfalls.md` | 19 个实测坑 | 部署与排障，人话版 |
+| `docs/pitfalls.md` | 实测排坑表 | 部署与排障，人话版 |
 | `eval/` | A/B 评测方案 | 量化省了多少额度（协议 + 任务集 + 雷达图脚本） |
 
 ## 完整部署流程
@@ -130,12 +130,12 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## 安装脚本的行为边界（重要）
 
-- **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西
+- **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西（唯一例外：卸载恢复原文件时会把该备份回写后删除——其余 `.bak` 一律保留）
 - `config.toml`：只追加 `[agents]` 段；已有 `[agents]` 则跳过
 - `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容
 - 三层协作协议写入**项目根** `AGENTS.md`（项目级指令），不再追加到全局 `~/.codex/AGENTS.md`——其他仓库不受三层协议影响
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
-- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚；项目数据文件与 .bak 一律保留，不自动删除）
+- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚：CQS 创建的文件删除、覆盖过的文件恢复原备份；用户原有文件与安装后被修改的文件一律不动、绝不自动覆盖）
 - 每次安装落一份 manifest 到 `~/.codex/.codex-quota-saver-manifest.*`，重复安装幂等
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 
@@ -167,7 +167,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
 
 - [x] 安全边界硬化：MCP 桥能力层白名单 + 自建 OAuth 认证（bridge-guard）已发布
-- [x] CI 三平台绿（installer / eval / 静态检查 / gitleaks / link check）
+- [x] Windows + Ubuntu CI 绿（installer / eval / 静态检查 / gitleaks / link check；macOS experimental / 未验证）
 - [x] installer 幂等 / dry-run / uninstall / rollback 测试通过
 - [ ] A/B 评测数据产出（协议见 eval/，n 小不宣称统计显著）
 - [x] 干净卸载路径验证

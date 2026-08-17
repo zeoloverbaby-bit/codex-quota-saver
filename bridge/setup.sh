@@ -2,7 +2,8 @@
 # bridge/setup.sh —— 双进程部署（macOS / Linux）
 # 用法: ./bridge/setup.sh <ngrok域名> <workspace> [<oauth密码>] [--dry-run]
 # 认证：guard 自建 OAuth 2.1（ChatGPT 连接器只有 OAuth/无认证/混合，API key 不可行）。
-# 安全：umask 077 全程；secrets 落 .secrets.local.env（600 + gitignore）；密码/token 经环境变量注入。
+# 安全：umask 077 全程；secrets 落 .secrets.local.env（600 + gitignore）；密码经环境变量注入 guard；
+#       上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不进 argv）。
 set -euo pipefail
 umask 077
 
@@ -15,7 +16,9 @@ DOMAIN="${DOMAIN%/}"
 BRIDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$BRIDGE_DIR/.secrets.local.env"
 GUARD_CONF="$BRIDGE_DIR/guard/guard_config.json"
-OAUTH_STATE="$BRIDGE_DIR/guard/oauth_state.json"
+OAUTH_STATE_DIR="$BRIDGE_DIR/guard/state"
+OAUTH_STATE="$OAUTH_STATE_DIR/oauth_state.json"
+LEGACY_OAUTH_STATE="$BRIDGE_DIR/guard/oauth_state.json"
 LAUNCHER="$BRIDGE_DIR/start-bridge.local.sh"
 GUARD_PORT=8766; UPSTREAM_PORT=8765
 
@@ -40,6 +43,7 @@ fi
 
 if [ "$MODE" = "--dry-run" ]; then
   echo "[dry-run] 将生成 $ENV_FILE / $GUARD_CONF / $LAUNCHER（密码随机，token 随机）"
+  echo "[dry-run] 状态目录 $OAUTH_STATE_DIR（chmod 700，仅当前用户）"
   echo "[dry-run] 运行时生成 $OAUTH_STATE（token_secret + 客户端注册表，重启免疫）"
   echo "[dry-run] 依赖：coding-tools-mcp==0.3.0 + guard venv（mcp==2.0.0 + pyjwt==2.13.0）+ ngrok 3.39.11"
   exit 0
@@ -67,6 +71,16 @@ chmod 600 "$ENV_FILE"
 # shellcheck disable=SC2086  # $ALLOWLIST 故意的分词（拆成 JSON 数组元素）
 ALLOWLIST_JSON=$(printf '"%s", ' $ALLOWLIST | sed 's/, $//')
 
+# OAuth state 目录：先建目录并收紧（0700），运行时生成的状态文件只对当前用户可读写；
+# 旧路径 oauth_state.json 自动迁移到 state/（授权不失效）
+mkdir -p "$OAUTH_STATE_DIR"
+chmod 700 "$OAUTH_STATE_DIR"
+if [ -f "$LEGACY_OAUTH_STATE" ] && [ ! -f "$OAUTH_STATE" ]; then
+  mv "$LEGACY_OAUTH_STATE" "$OAUTH_STATE"
+  chmod 600 "$OAUTH_STATE"
+  echo "已迁移旧 OAuth 状态到 guard/state/（授权依然有效，无需重新授权）。"
+fi
+
 cat > "$GUARD_CONF" <<EOF
 {
   "host": "127.0.0.1", "port": $GUARD_PORT,
@@ -75,7 +89,7 @@ cat > "$GUARD_CONF" <<EOF
   "public_url": "https://$DOMAIN",
   "upstream_token_env": "CQS_UPSTREAM_TOKEN",
   "oauth_password_env": "CQS_OAUTH_PASSWORD",
-  "oauth_state_file": "oauth_state.json",
+  "oauth_state_file": "state/oauth_state.json",
   "allowlist": [$ALLOWLIST_JSON]
 }
 EOF
@@ -90,7 +104,8 @@ fi
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
 # codex-quota-saver bridge launcher (generated, gitignored)
-# 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
+# 上游不开 OAuth、不对外（认证全在 guard 层）；token 经 CODING_TOOLS_MCP_AUTH_TOKEN
+# 环境变量传递（0.3.0 官方支持，不经命令行参数/argv）
 set -euo pipefail
 # 二重启动防护：guard 端口已被监听说明桥已在运行（避免端口/域名冲突的困惑报错）
 if netstat -an 2>/dev/null | grep -qE "(\.|:)$GUARD_PORT .*LISTEN"; then
@@ -99,7 +114,8 @@ if netstat -an 2>/dev/null | grep -qE "(\.|:)$GUARD_PORT .*LISTEN"; then
   exit 1
 fi
 source "$ENV_FILE"
-"\$(command -v coding-tools-mcp)" --workspace "$WORKSPACE" --host 127.0.0.1 --port $UPSTREAM_PORT --auth-token "\$CQS_UPSTREAM_TOKEN" &
+export CODING_TOOLS_MCP_AUTH_TOKEN="\$CQS_UPSTREAM_TOKEN"
+"\$(command -v coding-tools-mcp)" --workspace "$WORKSPACE" --host 127.0.0.1 --port $UPSTREAM_PORT &
 UP_PID=\$!
 "$BRIDGE_DIR/guard/.venv/bin/python" "$BRIDGE_DIR/guard/guard.py" --config "$GUARD_CONF" &
 GUARD_PID=\$!

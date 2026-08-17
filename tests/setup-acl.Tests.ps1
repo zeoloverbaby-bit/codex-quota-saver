@@ -65,6 +65,12 @@ if defined CQS_UPSTREAM_TOKEN (echo TOKEN_OK>"{1}") else (echo TOKEN_MISSING>"{1
         $shSource -match 'xdg-open "https://\$DOMAIN/auth/login"' | Should -BeTrue
         $shSource -match 'sleep 15' | Should -BeTrue
     }
+    It '上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递，不进入 --auth-token/argv（0.3.0 官方支持）' {
+        $setupSource -match 'CODING_TOOLS_MCP_AUTH_TOKEN=%CQS_UPSTREAM_TOKEN%' | Should -BeTrue
+        $setupSource -match '--auth-token' | Should -BeFalse
+        $shSource -match 'export CODING_TOOLS_MCP_AUTH_TOKEN=' | Should -BeTrue
+        $shSource -match '--auth-token' | Should -BeFalse
+    }
     It '二重启动防护功能：端口占用时提示 already running 并退出（块内 echo 无括号——括号会提前终结 if 块，2026-08-17 实测根因）' {
         $job = Start-Job -ScriptBlock {
             $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 18876)
@@ -112,5 +118,43 @@ Describe 'Secrets 生成（防越界 NUL）' {
     }
     It 'New-Token 为 64 位小写 hex' {
         (New-Token) -match '^[0-9a-f]{64}$' | Should -BeTrue
+    }
+}
+
+Describe 'OAuth state 目录权限（token_secret + 客户端注册表落盘处，Windows 继承已移除）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        . "$repoRoot/bridge/acl.ps1"
+        $setupSource = Get-Content "$repoRoot/bridge/setup.ps1" -Raw -Encoding UTF8
+        $shSource = Get-Content "$repoRoot/bridge/setup.sh" -Raw -Encoding UTF8
+        $who = whoami
+    }
+    It 'Tighten-Acl 用于目录：继承移除，且其后新建的子文件 ACL 只含当前用户（无 broad ACE）' {
+        $dir = New-Item -ItemType Directory "$TestDrive/state-dir"
+        Tighten-Acl -Path $dir.FullName -Rights '(R,W)'
+        $acl = Get-Acl $dir.FullName
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $child = New-Item -ItemType File "$($dir.FullName)/child.json"
+        $childAcl = Get-Acl $child.FullName
+        # 不是 world-readable 等价状态：无 Everyone / Users / Authenticated Users
+        $broad = $childAcl.Access | Where-Object { $_.IdentityReference.Value -match 'Everyone|BUILTIN\\Users|Authenticated Users' }
+        $broad.Count | Should -Be 0
+        # 当前用户仍可读写
+        $mine = $childAcl.Access | Where-Object { $_.IdentityReference.Value -eq $who }
+        $mine | Should -Not -BeNullOrEmpty
+        (($mine.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) | Should -BeTrue
+        (($mine.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) | Should -BeTrue
+    }
+    It 'setup.ps1 建 guard\state 目录并收紧 ACL、旧 oauth_state.json 迁移、配置指向 state/' {
+        $setupSource -match 'guard\\state' | Should -BeTrue
+        $setupSource -match 'Tighten-Acl \$StateDir' | Should -BeTrue
+        $setupSource -match 'Move-Item \$LegacyOAuthState' | Should -BeTrue
+        $setupSource -match 'state/oauth_state\.json' | Should -BeTrue
+    }
+    It 'setup.sh 建 state 目录 chmod 700、迁移旧状态、配置指向 state/' {
+        $shSource -match 'OAUTH_STATE_DIR=' | Should -BeTrue
+        $shSource -match 'chmod 700 "\$OAUTH_STATE_DIR"' | Should -BeTrue
+        $shSource -match 'mv "\$LEGACY_OAUTH_STATE"' | Should -BeTrue
+        $shSource -match 'state/oauth_state\.json' | Should -BeTrue
     }
 }

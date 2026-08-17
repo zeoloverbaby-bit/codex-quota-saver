@@ -2,7 +2,8 @@
 # bridge/setup.ps1 —— 双进程部署：coding-tools-mcp(内部) + bridge-guard(对外)（本文件必须 UTF-8 带 BOM）
 # 用法: .\bridge\setup.ps1 -Domain <ngrok域名> -Workspace <项目路径> [-OAuthPassword <密码>] [-DryRun]
 # 认证：guard 自建 OAuth 2.1（ChatGPT 连接器只有 OAuth/无认证/混合三种认证，API key 不可行）。
-# 安全：secrets 只落 .secrets.local.env（ACL 收紧到当前用户 + gitignore）；密码/token 经环境变量注入，进程命令行不可见。
+# 安全：secrets 只落 .secrets.local.env（ACL 收紧到当前用户 + gitignore）；密码经环境变量注入 guard；
+#       上游 token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不进 argv）。
 param(
     [Parameter(Mandatory=$true)][string]$Domain,
     [Parameter(Mandatory=$true)][string]$Workspace,
@@ -17,7 +18,9 @@ $BridgeDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $BridgeDir 'secrets.ps1')   # New-Token / New-Password（防越界 NUL 版）
 $EnvFile = Join-Path $BridgeDir '.secrets.local.env'
 $GuardConf = Join-Path $BridgeDir 'guard\guard_config.json'
-$OAuthState = Join-Path $BridgeDir 'guard\oauth_state.json'
+$StateDir = Join-Path $BridgeDir 'guard\state'
+$OAuthState = Join-Path $StateDir 'oauth_state.json'
+$LegacyOAuthState = Join-Path $BridgeDir 'guard\oauth_state.json'
 $Launcher = Join-Path $BridgeDir 'start-bridge.local.bat'
 $GuardPort = 8766
 $UpstreamPort = 8765
@@ -38,6 +41,7 @@ if ($DryRun) {
     Write-Host '[dry-run] 将生成：'
     Write-Host "  $EnvFile （OAuth 密码 + 上游 token，ACL 收紧）"
     Write-Host "  $GuardConf （无密钥）"
+    Write-Host "  $StateDir （状态目录，ACL 收紧：仅当前用户可读写）"
     Write-Host "  $OAuthState （运行时生成：token_secret + 客户端注册表，重启免疫）"
     Write-Host "  $Launcher （启动器，ACL 收紧）"
     Write-Host '  依赖安装：coding-tools-mcp==0.3.0 + guard venv（mcp==2.0.0 + pyjwt==2.13.0）'
@@ -82,6 +86,15 @@ Write-Utf8NoBom $EnvFile "# codex-quota-saver bridge secrets (gitignored, ACL-re
 Tighten-Acl $EnvFile
 
 # 4) guard 配置（无密钥；密码/token 经环境变量注入）
+# OAuth state 目录先建并收紧 ACL——运行时生成的状态文件自动继承「仅当前用户」权限
+# （Windows 下 os.chmod 对 ACL 无效，必须由这里处理；旧路径 oauth_state.json 自动迁移，授权不失效）
+if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Force $StateDir | Out-Null }
+Tighten-Acl $StateDir '(R,W)'
+if ((Test-Path $LegacyOAuthState) -and -not (Test-Path $OAuthState)) {
+    Move-Item $LegacyOAuthState $OAuthState -Force
+    Tighten-Acl $OAuthState '(R,W)'
+    Write-Host '已迁移旧 OAuth 状态到 guard\state\（授权依然有效，无需重新授权）。'
+}
 $guardJson = @{
     host = '127.0.0.1'; port = $GuardPort
     workspace = $Workspace.Replace('\', '/')
@@ -89,7 +102,7 @@ $guardJson = @{
     public_url = "https://$Domain"
     upstream_token_env = 'CQS_UPSTREAM_TOKEN'
     oauth_password_env = 'CQS_OAUTH_PASSWORD'
-    oauth_state_file = 'oauth_state.json'
+    oauth_state_file = 'state/oauth_state.json'
     allowlist = $Allowlist
 } | ConvertTo-Json -Depth 4
 Write-Utf8NoBom $GuardConf $guardJson
@@ -104,7 +117,7 @@ if (Test-Path $OAuthState) {
 $guardPyWin = $GuardPy.Replace('\', '\')
 $guardScriptWin = (Join-Path $BridgeDir 'guard\guard.py').Replace('\', '\')
 $guardConfWin = $GuardConf.Replace('\', '\')
-# 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
+# 上游不开 OAuth、不对外（认证全在 guard 层）；token 经 CODING_TOOLS_MCP_AUTH_TOKEN 环境变量传递（0.3.0 官方支持，不进 argv）
 $batContent = "@echo off`r`n" +
     "REM codex-quota-saver bridge launcher (generated, gitignored)`r`n" +
     "netstat -ano | findstr `":$GuardPort `" | findstr LISTENING >nul 2>&1`r`n" +
@@ -115,8 +128,10 @@ $batContent = "@echo off`r`n" +
     "  exit /b 1`r`n" +
     ")`r`n" +
     "for /f `"usebackq eol=# tokens=1,* delims==`" %%a in (`"$EnvFile`") do set `"%%a=%%b`"`r`n" +
+    "set `"CODING_TOOLS_MCP_AUTH_TOKEN=%CQS_UPSTREAM_TOKEN%`"`r`n" +
+    "REM upstream reads CODING_TOOLS_MCP_AUTH_TOKEN env var (0.3.0 official support) - token never enters argv`r`n" +
     "REM NOTE: start needs a non-empty title; an empty title swallows commands with quoted args`r`n" +
-    "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort --auth-token %CQS_UPSTREAM_TOKEN%`r`n" +
+    "start `"upstream`" /min `"$mcpExe`" --workspace `"$Workspace`" --host 127.0.0.1 --port $UpstreamPort`r`n" +
     "start `"guard`" /min `"$guardPyWin`" `"$guardScriptWin`" --config `"$guardConfWin`"`r`n" +
     "REM warmup: ngrok free interstitial needs one manual browser click (persistent cookie); auto-open login page 15s after start`r`n" +
     "start `"`" powershell -NoProfile -WindowStyle Hidden -Command `"Start-Sleep -Seconds 15; Start-Process 'https://$Domain/auth/login'`"`r`n" +
@@ -133,4 +148,4 @@ Write-Host '3. 连接器发起授权时，浏览器打开的密码页输入 OAut
 Write-Host "   OAuth 密码 = $OAuthPassword （也在 $EnvFile 的 CQS_OAUTH_PASSWORD 行，建议存密码管理器）"
 Write-Host '4. 新对话冒烟：读仓库提建议 + write_next_step 落盘 .codex/next-step.md'
 Write-Host '日常使用：双击 start-bridge.local.bat；不开发时关闭（隧道=项目后门）'
-Write-Host '重启免疫：注册表+签名密钥已落盘，重启桥授权依然有效；只有删除 guard\oauth_state.json 才需重新授权'
+Write-Host '重启免疫：注册表+签名密钥已落盘，重启桥授权依然有效；只有删除 guard\state\oauth_state.json 才需重新授权'
