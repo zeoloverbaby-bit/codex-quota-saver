@@ -7,6 +7,9 @@
 ### Changed
 - README：部署第 3 步与「已知问题」清单补充 ngrok 免费版拦截页说明（无法技术跳过、点一次 Visit Site、v1.6.4 起启动器自动预热）
 
+### Removed
+- bridge/start-bridge.bat / bridge/start-bridge.sh：v1.1-1.5 时代旧模板（手工填占位符 + 上游直连 `--oauth-mode`）。已被 setup 生成的 `start-bridge.local.*` 完全取代且全仓库零引用——删除以保持「启动器唯一权威来源 = setup」
+
 ## [1.6.4] - 2026-08-17
 
 ### Added
