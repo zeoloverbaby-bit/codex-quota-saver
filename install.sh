@@ -18,6 +18,8 @@ if [ "$MODE" = "install" ] && [ "$PROJECT_PATH" = "--uninstall" ]; then MODE="--
 if [ "$MODE" = "install" ] && [ "$PROJECT_PATH" = "--dry-run" ]; then MODE="--dry-run"; PROJECT_PATH=""; fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 测试 seam：CQS_TEST_SOURCE_ROOT 指向 staged source 树（S1/S2 升级场景）；默认脚本所在目录
+SOURCE_ROOT="${CQS_TEST_SOURCE_ROOT:-$REPO_ROOT}"
 MANIFEST="$CODEX_HOME/.codex-quota-saver-manifest"
 # provenance 合并需要旧 manifest 安装全程可读：写入只进 journal，成功后才原子提交
 MANIFEST_JOURNAL="$MANIFEST.tmp"
@@ -80,9 +82,15 @@ maybe_fail() { # $1=step —— 测试专用失败注入钩子（CQS_TEST_FAIL_A
 }
 
 # 本轮 mutation 追踪（partial failure 回滚用；换行分隔以兼容路径含空格）
+# BACKUPS_THIS_RUN = 本轮铸造的 origin 备份（失败时恢复并消费）
+# TXN_BACKUPS_THIS_RUN = 本轮覆盖前的 txn 快照（升级 S1→S2 等；失败恢复、成功消费，绝不进 manifest）
+# CREATED_THIS_RUN = 本轮新创建的文件（失败时删除）
 BACKUPS_THIS_RUN=""
+TXN_BACKUPS_THIS_RUN=""
 CREATED_THIS_RUN=""
 track_backup() { BACKUPS_THIS_RUN="$BACKUPS_THIS_RUN
+$1"; }
+track_txn_backup() { TXN_BACKUPS_THIS_RUN="$TXN_BACKUPS_THIS_RUN
 $1"; }
 track_created() { CREATED_THIS_RUN="$CREATED_THIS_RUN
 $1"; }
@@ -99,6 +107,15 @@ on_exit_failure() {
         if [ -f "$b" ] && [ -f "$d" ]; then cp -p "$b" "$d" && rm -f "$b" && log "已回滚: $d"; fi
       done <<EOF
 $BACKUPS_THIS_RUN
+EOF
+    fi
+    if [ -n "$TXN_BACKUPS_THIS_RUN" ]; then
+      while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        d="${b%.bak-*}"
+        if [ -f "$b" ] && [ -f "$d" ]; then cp -p "$b" "$d" && rm -f "$b" && log "已回滚(升级前版本): $d"; fi
+      done <<EOF
+$TXN_BACKUPS_THIS_RUN
 EOF
     fi
     if [ -n "$CREATED_THIS_RUN" ]; then
@@ -131,11 +148,19 @@ add_managed_block() { # $1=file $2=id $3=content-file
     return
   fi
   if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
-  local existed=0 created=1 modified=0 ownership="cqs" backup=""
+  # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（同 install_file 的 origin/txn 分离）
+  local existed=0 created=1 modified=0 ownership="cqs" backup="" txn=""
   [ -f "$1" ] && existed=1
   if [ "$existed" = "1" ]; then
-    if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
-    created=0; modified=1; ownership="user"
+    if [ "$pcreated" = "1" ]; then
+      txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    elif [ -n "$pbackup" ]; then
+      backup="$pbackup"; created=0; modified=1; ownership="user"
+      txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    else
+      backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+      created=0; modified=1; ownership="user"
+    fi
   else
     track_created "$1"
   fi
@@ -161,7 +186,7 @@ agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号）。
   # span 选择用 awk（仅行匹配无替换）；key=value 切分用 sed BRE——避开 mawk sub()
   # 的替换语义（现场：mawk 的 sub(/[[:space:]]*=/, "\t") 只吃掉 =、留下前导空格，
   # 导致期望值带空格、全部误判冲突）。
-  agents_span "$REPO_ROOT/global/config-agents.toml" \
+  agents_span "$SOURCE_ROOT/global/config-agents.toml" \
     | sed -n "s/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=[[:space:]]*\([^[:space:]].*[^[:space:]]\|[^[:space:]]\)[[:space:]]*$/\1$(printf '\t')\2/p"
 }
 
@@ -247,11 +272,19 @@ merge_agents_toml() { # $1=file —— key 级 reconciliation
   # 无 [agents] 表（文件不存在或表不存在）：整块 append（CQS 拥有整个表）
   if [ ! -f "$1" ] || ! grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
     if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
-    local existed=0 created=1 modified=0 ownership="cqs" backup=""
+    # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（同 install_file 的 origin/txn 分离）
+    local existed=0 created=1 modified=0 ownership="cqs" backup="" txn=""
     [ -f "$1" ] && existed=1
     if [ "$existed" = "1" ]; then
-      if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
-      created=0; modified=1; ownership="user"
+      if [ "$pcreated" = "1" ]; then
+        txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+      elif [ -n "$pbackup" ]; then
+        backup="$pbackup"; created=0; modified=1; ownership="user"
+        txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+      else
+        backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+        created=0; modified=1; ownership="user"
+      fi
     else
       track_created "$1"
     fi
@@ -361,15 +394,24 @@ install_file() { # $1=src $2=dest $3=skip_if_exists(0/1) $4=overwrite_if_changed
   fi
   if [ "$MODE" = "--dry-run" ]; then log "dry-run copy: $2"; return; fi
   mkdir -p "$(dirname "$2")"
-  local backup=""
+  # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（filesystem existence 只是 observation）：
+  #  - 用户文件首次被 CQS 覆盖（无 origin）→ 快照即 origin（进 manifest，卸载恢复用）
+  #  - 已有 origin（升级）或 dest 是 CQS 自己创建的 → 快照是 txn（仅本轮回滚用，成功后消费，绝不进 manifest）
+  local backup="" txn="" created=1 modified=0 ownership="cqs"
   if [ "$existed" = "1" ]; then
-    if [ -z "$pbackup" ]; then backup="$(unique_backup_path "$2")"; cp -p "$2" "$backup"; track_backup "$backup"; fi
+    if [ "$pcreated" = "1" ]; then
+      txn="$(unique_backup_path "$2")"; cp -p "$2" "$txn"; track_txn_backup "$txn"
+    elif [ -n "$pbackup" ]; then
+      backup="$pbackup"; created=0; modified=1; ownership="user"
+      txn="$(unique_backup_path "$2")"; cp -p "$2" "$txn"; track_txn_backup "$txn"
+    else
+      backup="$(unique_backup_path "$2")"; cp -p "$2" "$backup"; track_backup "$backup"
+      created=0; modified=1; ownership="user"
+    fi
   else
     track_created "$2"
   fi
   cp -p "$1" "$2"
-  local ownership="cqs" created=1 modified=0
-  if [ "$existed" = "1" ]; then ownership="user" created=0 modified=1; fi
   # backup 必须为最后字段（路径可含空格，uninstall 用「最后出现的 backup=」提取）
   manifest_add "copy" "$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_hash=$(sha256sum "$2" | cut -d' ' -f1)" "src=$1" "backup=$backup"
   log "copy: $2"
@@ -446,24 +488,33 @@ if [ "$MODE" = "install" ]; then
   mkdir -p "$CODEX_HOME/agents"
 fi
 
-add_managed_block "$CODEX_HOME/AGENTS.md" "global-agents" "$REPO_ROOT/global/AGENTS.md"
+add_managed_block "$CODEX_HOME/AGENTS.md" "global-agents" "$SOURCE_ROOT/global/AGENTS.md"
 maybe_fail 1
 merge_agents_toml  "$CODEX_HOME/config.toml"
 maybe_fail 2
-install_file "$REPO_ROOT/global/agents/luna-worker.toml" "$CODEX_HOME/agents/luna-worker.toml" 0 1
+install_file "$SOURCE_ROOT/global/agents/luna-worker.toml" "$CODEX_HOME/agents/luna-worker.toml" 0 1
 maybe_fail 3
 # 项目级协议：托管块合并（已存在追加、不存在创建）；协议文本 source of truth = project/AGENTS.md
-add_managed_block "$PROJECT_PATH/AGENTS.md" "project-protocol" "$REPO_ROOT/project/AGENTS.md"
+add_managed_block "$PROJECT_PATH/AGENTS.md" "project-protocol" "$SOURCE_ROOT/project/AGENTS.md"
 maybe_fail 4
-install_file "$REPO_ROOT/project/dot-codex/config.toml" "$PROJECT_PATH/.codex/config.toml" 1 0
+install_file "$SOURCE_ROOT/project/dot-codex/config.toml" "$PROJECT_PATH/.codex/config.toml" 1 0
 maybe_fail 5
-install_file "$REPO_ROOT/project/dot-codex/next-step.md" "$PROJECT_PATH/.codex/next-step.md" 1 0
+install_file "$SOURCE_ROOT/project/dot-codex/next-step.md" "$PROJECT_PATH/.codex/next-step.md" 1 0
 maybe_fail 6
-install_file "$REPO_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1
+install_file "$SOURCE_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1
 maybe_fail 7
 
-# 提交点：全部步骤成功后原子替换旧 manifest（dry-run 无 journal，跳过提交）
+# 提交点：全部步骤成功后原子替换旧 manifest（dry-run 无 journal，跳过提交）。
+# mv 先于 txn 消费：若 mv 失败，EXIT trap 仍可用 txn 回滚。
 if [ "$MODE" = "install" ]; then
   mv -f "$MANIFEST_JOURNAL" "$MANIFEST"
+  if [ -n "$TXN_BACKUPS_THIS_RUN" ]; then
+    while IFS= read -r b; do
+      [ -z "$b" ] && continue
+      [ -f "$b" ] && rm -f "$b"
+    done <<EOF
+$TXN_BACKUPS_THIS_RUN
+EOF
+  fi
 fi
 log "安装完成（mode=$MODE）。"

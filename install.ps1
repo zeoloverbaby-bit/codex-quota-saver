@@ -14,6 +14,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
 
+function Get-SourceRoot {
+    # 测试 seam：CQS_TEST_SOURCE_ROOT 指向 staged source 树（S1/S2 升级场景）；默认脚本所在目录
+    if ($env:CQS_TEST_SOURCE_ROOT) { return $env:CQS_TEST_SOURCE_ROOT }
+    return $RepoRoot
+}
+
 function Get-Timestamp { Get-Date -Format 'yyyyMMdd-HHmmss' }
 function Get-Sha256([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).Hash }
 function Get-ManifestPath([string]$CodexHome) { Join-Path $CodexHome '.codex-quota-saver-manifest.json' }
@@ -53,6 +59,8 @@ function Merge-ManifestEntry($Prev, $New) {
     if ($null -eq $Prev) { return $New }
     if ($Prev.created_by_cqs -or $New.created_by_cqs) { $New.created_by_cqs = $true }
     if ($Prev.modified_by_cqs -or $New.modified_by_cqs) { $New.modified_by_cqs = $true }
+    # ownership 也是持久 lifecycle provenance：CQS 创建过 → 永远 cqs（Rule A，绝不降级）
+    if ($New.ownership -ne 'cqs' -and $Prev.ownership -eq 'cqs') { $New.ownership = 'cqs' }
     # 本轮未产生新值 → 沿用旧值：backup 身份只有第一份（origin），hash 只记 CQS 最近一次落盘内容
     if (-not $New.backup -and $Prev.backup) { $New.backup = $Prev.backup }
     if (-not $New.installed_hash -and $Prev.installed_hash) { $New.installed_hash = $Prev.installed_hash }
@@ -76,16 +84,24 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
     }
     $block = "`n$begin`n$Content`n$end`n"
     if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
+    $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
     $backup = $null
     $backupCreatedThisRun = $false
+    $txnBackup = $null
     if ($existed) {
-        if ($null -ne $Prev -and $Prev.backup) { $backup = $Prev.backup }
-        else { $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true }
+        if ($prevCreated) {
+            $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+        } elseif ($null -ne $Prev -and $Prev.backup) {
+            $backup = $Prev.backup
+            $txnBackup = Get-UniqueBackupPath $Path; Copy-Item $Path $txnBackup -Force
+        } else {
+            $backup = Get-UniqueBackupPath $Path; Copy-Item $Path $backup -Force; $backupCreatedThisRun = $true
+        }
     }
     Add-Content -Path $Path -Value $block -Encoding UTF8
-    $ownership = 'cqs'; $modified = $false
-    if ($existed) { $ownership = 'user'; $modified = $true }
-    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=(-not $existed);modified_by_cqs=$modified;created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun})
+    $ownership = 'cqs'; $created = $true; $modified = $false
+    if ($existed -and -not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+    return (Merge-ManifestEntry $Prev @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
 }
 
 # 按标记精确移除托管块；无块则跳过。begin/end 可自定义（TOML 段用 # 注释标记）
@@ -107,7 +123,7 @@ function Remove-ManagedBlock([string]$Path, [string]$Id, [string]$Begin, [string
 # 是显式代码。冲突 = fail-fast（preflight 在任何 mutation 前终止）；绝不静默覆盖用户值；
 # 文本补丁只在现有表头后插 markers+缺失 keys，绝不整文件序列化。
 function Get-AgentsDesiredState {
-    $toml = Get-Content (Join-Path $RepoRoot 'global\config-agents.toml') -Raw -Encoding UTF8
+    $toml = Get-Content (Join-Path (Get-SourceRoot) 'global\config-agents.toml') -Raw -Encoding UTF8
     $found = @{}
     $inAgents = $false
     foreach ($line in ($toml -split "`r?`n")) {
@@ -326,18 +342,27 @@ function Install-File([string]$Src, [string]$Dest, [bool]$SkipIfExists, [bool]$O
     if ($DryRun) { return @{action='copy';dest=$Dest;dry=$true} }
     $dir = Split-Path -Parent $Dest
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（filesystem existence 只是 observation）：
+    #  - 用户文件首次被 CQS 覆盖（无 origin）→ 快照即 origin（进 manifest，卸载恢复用）
+    #  - 已有 origin（升级）或 dest 是 CQS 自己创建的 → 快照是 txn（仅本轮回滚用，成功后消费，绝不进 manifest）
+    $prevCreated = ($null -ne $Prev -and [bool]$Prev.created_by_cqs)
     $backup = $null
     $backupCreatedThisRun = $false
-    if ($existed -and -not ($null -ne $Prev -and $Prev.backup)) {
-        # origin 备份只有第一份：旧条目已有备份则绝不新建、绝不覆盖（Rule E）
-        $backup = Get-UniqueBackupPath $Dest
-        Copy-Item $Dest $backup -Force
-        $backupCreatedThisRun = $true
+    $txnBackup = $null
+    if ($existed) {
+        if ($prevCreated) {
+            $txnBackup = Get-UniqueBackupPath $Dest; Copy-Item $Dest $txnBackup -Force
+        } elseif ($null -ne $Prev -and $Prev.backup) {
+            $backup = $Prev.backup
+            $txnBackup = Get-UniqueBackupPath $Dest; Copy-Item $Dest $txnBackup -Force
+        } else {
+            $backup = Get-UniqueBackupPath $Dest; Copy-Item $Dest $backup -Force; $backupCreatedThisRun = $true
+        }
     }
     Copy-Item $Src $Dest -Force
     $ownership = 'cqs'; $created = $true; $modified = $false
-    if ($existed) { $ownership = 'user'; $created = $false; $modified = $true }
-    return (Merge-ManifestEntry $Prev @{action='copy';dest=$Dest;src=$Src;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;backup=$backup;installed_hash=(Get-Sha256 $Dest);created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun})
+    if ($existed -and -not $prevCreated) { $ownership = 'user'; $created = $false; $modified = $true }
+    return (Merge-ManifestEntry $Prev @{action='copy';dest=$Dest;src=$Src;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;backup=$backup;installed_hash=(Get-Sha256 $Dest);created_this_run=(-not $existed);backup_created_this_run=$backupCreatedThisRun;txn_backup_this_run=$txnBackup})
 }
 
 function Invoke-Uninstall([string]$CodexHome) {
@@ -436,30 +461,31 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
     $projectDot   = Join-Path $ProjectPath '.codex'
 
     $Staged = New-Object System.Collections.ArrayList
+    $srcRoot = Get-SourceRoot
     try {
         # 1) 全局 AGENTS：子代理硬规则（托管块）
-        $Staged.Add((Add-ManagedBlock -Path $globalAgents -Id 'global-agents' -Content (Get-Content "$RepoRoot\global\AGENTS.md" -Raw -Encoding UTF8) -DryRun:$DryRun -Prev $prevByDest[$globalAgents])) | Out-Null
+        $Staged.Add((Add-ManagedBlock -Path $globalAgents -Id 'global-agents' -Content (Get-Content (Join-Path $srcRoot 'global\AGENTS.md') -Raw -Encoding UTF8) -DryRun:$DryRun -Prev $prevByDest[$globalAgents])) | Out-Null
         Test-FailAfter 1
         # 2) 全局 config.toml：[agents] 段
         $Staged.Add((Merge-AgentsToml -Path $codexConfig -DryRun:$DryRun -Prev $prevByDest[$codexConfig])) | Out-Null
         Test-FailAfter 2
         # 3) 全局 luna-worker 定义
-        $Staged.Add((Install-File -Src "$RepoRoot\global\agents\luna-worker.toml" -Dest $workerDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun -Prev $prevByDest[$workerDest])) | Out-Null
+        $Staged.Add((Install-File -Src (Join-Path $srcRoot 'global\agents\luna-worker.toml') -Dest $workerDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun -Prev $prevByDest[$workerDest])) | Out-Null
         Test-FailAfter 3
         # 4) 项目级协议 → <project>/AGENTS.md（托管块合并：已存在追加、不存在创建；
         #    协议文本 source of truth = project/AGENTS.md，installer 内不复制第二份）
         $projAgents = Join-Path $ProjectPath 'AGENTS.md'
-        $Staged.Add((Add-ManagedBlock -Path $projAgents -Id 'project-protocol' -Content (Get-Content "$RepoRoot\project\AGENTS.md" -Raw -Encoding UTF8) -DryRun:$DryRun -Prev $prevByDest[$projAgents])) | Out-Null
+        $Staged.Add((Add-ManagedBlock -Path $projAgents -Id 'project-protocol' -Content (Get-Content (Join-Path $srcRoot 'project\AGENTS.md') -Raw -Encoding UTF8) -DryRun:$DryRun -Prev $prevByDest[$projAgents])) | Out-Null
         Test-FailAfter 4
         # 5) 项目级 .codex 三件（config/next-step 已存在则跳过；skill 按内容更新）
         $dotConfig = Join-Path $projectDot 'config.toml'
-        $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\config.toml" -Dest $dotConfig -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun -Prev $prevByDest[$dotConfig])) | Out-Null
+        $Staged.Add((Install-File -Src (Join-Path $srcRoot 'project\dot-codex\config.toml') -Dest $dotConfig -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun -Prev $prevByDest[$dotConfig])) | Out-Null
         Test-FailAfter 5
         $dotNext = Join-Path $projectDot 'next-step.md'
-        $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\next-step.md" -Dest $dotNext -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun -Prev $prevByDest[$dotNext])) | Out-Null
+        $Staged.Add((Install-File -Src (Join-Path $srcRoot 'project\dot-codex\next-step.md') -Dest $dotNext -SkipIfExists $true -OverwriteIfChanged $false -DryRun:$DryRun -Prev $prevByDest[$dotNext])) | Out-Null
         Test-FailAfter 6
         $skillDest = Join-Path $projectDot 'skills\luna-routing\SKILL.md'
-        $Staged.Add((Install-File -Src "$RepoRoot\project\dot-codex\skills\luna-routing\SKILL.md" -Dest $skillDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun -Prev $prevByDest[$skillDest])) | Out-Null
+        $Staged.Add((Install-File -Src (Join-Path $srcRoot 'project\dot-codex\skills\luna-routing\SKILL.md') -Dest $skillDest -SkipIfExists $false -OverwriteIfChanged $true -DryRun:$DryRun -Prev $prevByDest[$skillDest])) | Out-Null
         Test-FailAfter 7
 
         if ($DryRun) {
@@ -467,9 +493,22 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
             $Staged | ForEach-Object { Write-Host "  $($_.action) -> $($_.dest) $($_.reason)" }
             return
         }
-        # 提交点：剥离仅本轮回滚使用的临时字段后原子写 manifest
-        foreach ($e in @($Staged)) { [void]$e.Remove('created_this_run'); [void]$e.Remove('backup_created_this_run') }
-        Write-Manifest -Path $manifestPath -Entries $Staged.ToArray()
+        # 提交点：剥离 run-scoped 字段后原子写 manifest。
+        # $Staged 原条目保留 txn 路径——若 Write-Manifest 抛错，catch 仍能按 txn 回滚。
+        $clean = @()
+        foreach ($e in @($Staged)) {
+            $c = @{}
+            foreach ($k in $e.Keys) {
+                if ($k -in @('created_this_run', 'backup_created_this_run', 'txn_backup_this_run')) { continue }
+                $c[$k] = $e[$k]
+            }
+            $clean += $c
+        }
+        Write-Manifest -Path $manifestPath -Entries $clean
+        # 提交成功后消费 txn 快照（升级前状态快照不再需要；失败路径由 catch 回滚并消费）
+        foreach ($e in @($Staged)) {
+            if ($e.txn_backup_this_run -and (Test-Path $e.txn_backup_this_run)) { Remove-Item $e.txn_backup_this_run -Force }
+        }
     } catch {
         # partial failure：旧 manifest 原样保留（唯一提交点 = Write-Manifest），
         # 本轮已发生的 mutation 按文件系统事实回滚；无法完全恢复的保留证据并提示人工。
@@ -480,6 +519,10 @@ function Invoke-Install([string]$ProjectPath, [string]$CodexHome, [bool]$DryRun)
                 Copy-Item $e.backup $e.dest -Force
                 Remove-Item $e.backup -Force
                 Write-Host "  已回滚: $($e.dest)"
+            } elseif ($e.txn_backup_this_run -and (Test-Path $e.txn_backup_this_run)) {
+                Copy-Item $e.txn_backup_this_run $e.dest -Force
+                Remove-Item $e.txn_backup_this_run -Force
+                Write-Host "  已回滚(升级前版本): $($e.dest)"
             } elseif ($e.created_this_run -and (Test-Path $e.dest)) {
                 Remove-Item $e.dest -Force
                 Write-Host "  已移除本轮创建: $($e.dest)"

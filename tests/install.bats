@@ -9,6 +9,19 @@ setup() {
 
 teardown() { rm -rf "$TESTDIR"; }
 
+# ---- Cross-version upgrade fixture：把 repo 源树复制为 s1/s2/s3 staged 副本，
+# CQS_TEST_SOURCE_ROOT seam 指向哪个副本，install.sh 就读哪个版本的源。----
+stage_sources() { # $1=dir
+  local root="$1"
+  mkdir -p "$root/s1" "$root/s2" "$root/s3"
+  cp -r "$BATS_TEST_DIRNAME/../global" "$root/s1/global"
+  cp -r "$BATS_TEST_DIRNAME/../project" "$root/s1/project"
+  cp -r "$root/s1/global" "$root/s2/global"
+  cp -r "$root/s1/project" "$root/s2/project"
+  cp -r "$root/s1/global" "$root/s3/global"
+  cp -r "$root/s1/project" "$root/s3/project"
+}
+
 @test "dry-run 不落任何文件" {
   run bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --dry-run
   [ "$status" -eq 0 ]
@@ -232,5 +245,107 @@ teardown() { rm -rf "$TESTDIR"; }
   [ -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest.tmp" ]
   [ "$(cat "$CQS_TEST_CODEX_HOME/AGENTS.md")" = "USER AGENTS" ]
   [ ! -f "$CQS_TEST_CODEX_HOME/config.toml" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
+}
+
+# ---- Cross-version upgrade（S1→S2/S3）：lifecycle provenance 不随版本升级衰减 ----
+
+@test "Upgrade Case A：USER → S1 → S2 → uninstall → USER（origin 身份贯穿升级）" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'USER ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s1/global/agents/luna-worker.toml"
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  # origin 仍只有一份（txn 成功已消费）
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'created_by_cqs=0'
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'backup=.*\.bak-'
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER ORIGINAL" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
+}
+
+@test "Upgrade Case B：missing → S1 → S2 → uninstall → missing（CQS-created 不被重分类）" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'created_by_cqs=1'
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'backup=$'
+  # CQS-created 升级：绝不铸造假 origin；txn 已消费 → 零 .bak
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" ]
+}
+
+@test "Upgrade Case C：USER → S1 → S2 → S3 → uninstall → USER（多版本不衰减）" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  printf 'LUNA WORKER V3\n' > "$TESTDIR/src/s3/global/agents/luna-worker.toml"
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'USER ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s3" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s3/global/agents/luna-worker.toml"
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER ORIGINAL" ]
+}
+
+@test "Upgrade Case D：missing → S1 → S2 → S3 → uninstall → missing" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  printf 'LUNA WORKER V3\n' > "$TESTDIR/src/s3/global/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s3" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'created_by_cqs=1'
+  grep 'agents/luna-worker.toml' "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" | grep -q 'backup=$'
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
+}
+
+@test "Upgrade Case E：USER → S1 → 升级 S2 失败 → 恢复 S1（不楔死、origin 完好）" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'USER ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cp "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" "$TESTDIR/manifest.before"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" CQS_TEST_FAIL_AFTER=3 bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  # transaction invariant：文件系统 = S1，manifest = S1，origin 备份完好
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s1/global/agents/luna-worker.toml"
+  cmp -s "$TESTDIR/manifest.before" "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest"
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 1 ]
+  # 不楔死：重试升级可完成；uninstall 恢复 USER ORIGINAL
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER ORIGINAL" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
+}
+
+@test "Upgrade Case F：missing → S1 → 升级 S2 失败 → 恢复 S1 且 created_by_cqs 保持" {
+  stage_sources "$TESTDIR/src"
+  printf 'LUNA WORKER V2\n' > "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s1" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cp "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" "$TESTDIR/manifest.before"
+  run env CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" CQS_TEST_FAIL_AFTER=3 bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s1/global/agents/luna-worker.toml"
+  cmp -s "$TESTDIR/manifest.before" "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest"
+  [ "$(find "$CQS_TEST_CODEX_HOME" -name '*.bak-*' | wc -l)" -eq 0 ]
+  CQS_TEST_SOURCE_ROOT="$TESTDIR/src/s2" bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cmp -s "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" "$TESTDIR/src/s2/global/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
   [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
 }
