@@ -56,10 +56,10 @@ model_reasoning_effort = "high"
 | 子代理 | luna_worker（规则化 spawn） | 官方 Luna 委派（prompt 路由） |
 | 规划环节 | 网页 GPT 写 next-step.md | 两个子方案：C1 = 同样走网页 GPT 交接；C2 = Codex 内闭环（Sol 自规划） |
 
-> 口径注记（2026-08-16）：Multi Agents v2 的**官宣**（Stable contract）与地面可用性（Known upstream bug，#36294/#35097）是两回事；网上流传的 `features.multi_agent_v2` **配置键**经同日验证查无实据（见 `global/config-agents.toml` 注释）。本协议只依据官宣 + issue 状态登记候选臂。
+> 口径注记（2026-08-16 立，2026-08-17 复核）：Multi Agents v2 的**官宣**（Stable contract）与地面可用性（Known upstream bug，#36294/#35097）是两回事。`features.multi_agent_v2` **配置键**存在于当前官方源码（Stable 阶段、默认关闭，支持布尔/结构化表两种形态；2026-08-17 复核，见 `global/config-agents.toml` 注释）——但 V2 的 `spawn_agent` 仍按静态目录把 Luna 当 V1 过滤。本协议只依据官宣 + issue 状态登记候选臂。
 
 **触发条件（同时满足才启动，届时单独预注册）**：
-1. 官方修复落地——社区确认 V2 `spawn_agent` 不再把 Luna 当 V1 过滤（跟踪 issue #36294 / #35097；2026-08-16 仍 Open）
+1. 官方修复落地——社区确认 V2 `spawn_agent` 不再把 Luna 当 V1 过滤（跟踪 issue #36294 / #35097；2026-08-17 仍 Open）
 2. #32587（子代理静默继承父模型）经实测确认修复，或 C 臂的 prompt 路由经 rollout 核对稳定
 3. 协议 A 数据产出后——A/B 结论决定 C 臂的对照问题（若 B 已大幅优于 A，则 C 的对照问题 = "C vs B：Sol 编排是否值得"；若 B 未达标，则对照 A）
 
