@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-08-17
+
+### Fixed
+- launcher env 加载失效（关键修复，双重根因）：
+  - `New-Password` 越界索引：固定模数 59 但字母表实际 57 字符，越界索引返回 `$null` → NUL 字符混入密码（实测 42% 概率）→ NUL 字节写进 `.secrets.local.env` → cmd 的 `for /f` 文本模式读到 NUL 即停止 → `CQS_*` 变量全部未加载 → guard 启动 KeyError 静默退出（重试 10×3s 后窗口消失）、upstream 空 token 崩溃。现场表现：「双击后约 30 秒两个窗口消失、只剩 ngrok」。修复：按字母表实际长度取模 + 拒绝采样上限 `floor(255/n)*n`；生成逻辑抽为 `bridge/secrets.ps1` 并加 200 次生成回归测试
+  - env 文件注释含 em-dash（非 ASCII）同样会破坏 `for /f` 在 GBK 系统的读取：模板改纯 ASCII + `eol=#` + `set` 引号
+- `bridge/guard/guard.py`：环境变量缺失立即失败并打印明确原因，不再静默重试 30 秒
+- launcher 二重启动防护：guard 端口已监听时提示「桥已在运行」并退出（Windows `netstat` / macOS·Linux `netstat` 双实现）；修复防护块内 echo 含括号导致 cmd 语法错误的问题
+- 新增回归测试：secrets 生成 200 次、env 模板 ASCII 断言、`for /f` 加载功能测试、二重启动防护功能测试（Pester）
+
 ## [1.6.1] - 2026-08-17
 
 ### Fixed

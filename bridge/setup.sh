@@ -58,7 +58,7 @@ UP_TOK="$(new_token)"
 if [ -z "$OAUTH_PASSWORD" ]; then OAUTH_PASSWORD="$(new_password)"; fi
 
 cat > "$ENV_FILE" <<EOF
-# codex-quota-saver bridge secrets (chmod 600 + gitignore) — DO NOT COMMIT
+# codex-quota-saver bridge secrets (chmod 600 + gitignore) - DO NOT COMMIT
 export CQS_OAUTH_PASSWORD=$OAUTH_PASSWORD
 export CQS_UPSTREAM_TOKEN=$UP_TOK
 EOF
@@ -92,6 +92,12 @@ cat > "$LAUNCHER" <<EOF
 # codex-quota-saver bridge launcher (generated, gitignored)
 # 上游不开 OAuth、不对外（认证全在 guard 层）；--auth-token 仅本机静态互信
 set -euo pipefail
+# 二重启动防护：guard 端口已被监听说明桥已在运行（避免端口/域名冲突的困惑报错）
+if netstat -an 2>/dev/null | grep -qE "(\.|:)$GUARD_PORT .*LISTEN"; then
+  echo "Bridge is already running (port $GUARD_PORT in use). Do NOT start it twice."
+  echo "To restart: stop the old bridge first, then run this file again."
+  exit 1
+fi
 source "$ENV_FILE"
 "\$(command -v coding-tools-mcp)" --workspace "$WORKSPACE" --host 127.0.0.1 --port $UPSTREAM_PORT --auth-token "\$CQS_UPSTREAM_TOKEN" &
 UP_PID=\$!
