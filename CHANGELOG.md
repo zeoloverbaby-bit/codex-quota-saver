@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 语义化版本。历史条目从仓库 commit 重建。
 
-## [Unreleased]
+## [1.6.7] - 2026-08-17
 
 ### Security
 - installer 跨版本升级语义（S1→S2）：mutation branch 不再按当前文件系统存在性重推断 ownership（CQS 创建的文件升级后仍 created_by_cqs，绝不铸造假 origin 备份）；backup 角色分离——origin（首份用户内容快照，进 manifest，卸载恢复用）与 txn（本轮覆盖前快照，绝不进 manifest，成功消费/失败恢复），升级中途失败恢复 S1、manifest 原样、重试不楔死
