@@ -13,6 +13,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $BridgeDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $BridgeDir 'acl.ps1')   # Tighten-Acl：secrets 默认 (R,W)；launcher 需 (RX,W)——双击执行缺 X 会报「无法访问」
 $EnvFile = Join-Path $BridgeDir '.secrets.local.env'
 $GuardConf = Join-Path $BridgeDir 'guard\guard_config.json'
 $OAuthState = Join-Path $BridgeDir 'guard\oauth_state.json'
@@ -47,9 +48,6 @@ function New-Password {
 }
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
-}
-function Tighten-Acl([string]$Path) {
-    icacls $Path /inheritance:r /grant:r "$env:USERNAME`:(R,W)" | Out-Null
 }
 
 if ($Domain -match '^https?://') { $Domain = ($Domain -replace '^https?://', '') }
@@ -134,7 +132,7 @@ $batContent = "@echo off`r`n" +
     "`"$ngrokExe`" http --url=$Domain $GuardPort`r`n" +
     "pause`r`n"
 [System.IO.File]::WriteAllText($Launcher, $batContent, (New-Object System.Text.ASCIIEncoding))
-Tighten-Acl $Launcher
+Tighten-Acl $Launcher '(RX,W)'   # launcher 需执行权限（双击 .bat）；secrets 保持默认 (R,W)
 
 Write-Host ''
 Write-Host '======== 部署完成（人工 2 分钟）========'
