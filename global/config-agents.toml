@@ -1,9 +1,16 @@
 # codex-quota-saver: 子代理默认模型（由 install 脚本追加到 ~/.codex/config.toml 末尾）
-# 知识时间戳（verified_at=2026-08-16）：
+# 知识时间戳（verified_at=2026-08-16；multi_agent_v2 契约于 2026-08-17 复核）：
 # - Observed behavior: 子代理默认模型由本 [agents] 段 default_subagent_model 控制（经 rollout 核对）
 # - Stable contract: 官方 Multi Agents v2（Sol 主 + Luna 舰队）已于 2026-08-15 官宣
-# - Known upstream bug: 该功能地面半成品（#36294/#35097，Luna 被 V2 spawn_agent 当 V1 过滤）
-# - Observed behavior: 网上流传的 [features.multi_agent_v2] 配置键经 2026-08-16 验证查无实据，不要使用
+# - Stable contract（2026-08-17 复核，source=openai/codex main c6058cca）:
+#   [features] 下存在 multi_agent_v2 配置键——支持布尔（multi_agent_v2 = true）与
+#   结构化表（[features.multi_agent_v2]，enabled + 若干 tunable）两种形态；
+#   Feature stage = Stable，default_enabled = false（需显式开启）；
+#   legacy multi_agent（Collab）默认 true，multi_agent_v2 启用后优先。
+#   （2026-08-16 的「配置键查无实据」结论已被官方源码推翻，特此更正。）
+# - Known upstream bug: 该功能地面半成品（#36294/#35097，Luna 被 V2 spawn_agent 当 V1 过滤；
+#   限制机制出自官方 PR #32751：spawn_agent 模型覆盖必须与当前 backend 兼容）
+# - 本仓库仍走「Luna 主 + Luna 子」V1 同版本委派，不使用 multi_agent_v2——理由见上
 [agents]
 enabled = true
 default_subagent_model = "gpt-5.6-luna"

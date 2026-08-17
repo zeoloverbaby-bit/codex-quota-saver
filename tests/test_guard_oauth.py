@@ -25,7 +25,13 @@ import oauth_provider  # noqa: E402
 
 from mcp.client.session import ClientSession  # noqa: E402
 from mcp.client.streamable_http import streamable_http_client  # noqa: E402
-from mcp.server.auth.provider import AuthorizationCode, ProviderTokenVerifier  # noqa: E402
+from mcp.server.auth.provider import (  # noqa: E402
+    AuthorizationCode,
+    AuthorizationParams,
+    AuthorizeError,
+    ProviderTokenVerifier,
+    RegistrationError,
+)
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions  # noqa: E402
 from mcp.server.lowlevel import Server  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
@@ -431,3 +437,148 @@ def test_state_dir_and_file_restrictive_modes_posix(tmp_path):
         state_path=state_path, issuer=ISSUER, resource_url=RESOURCE, password_env=PASSWORD_ENV)
     assert stat.S_IMODE(os.stat(state_path).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(os.path.dirname(state_path)).st_mode) == 0o700
+
+
+# ---- bounded transient state：公网入口资源上限（clients 落盘 / pending+codes 内存）----
+
+def _mk_oauth_client(cid="c"):
+    return OAuthClientInformationFull.model_validate({
+        "client_id": cid, "redirect_uris": [CALLBACK],
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"], "response_types": ["code"],
+    })
+
+
+def _mk_auth_params():
+    return AuthorizationParams(
+        state="st", scopes=["mcp"], code_challenge="x",
+        redirect_uri=CALLBACK, redirect_uri_provided_explicitly=True)
+
+
+def _mk_provider(tmp_path, name="s.json"):
+    return oauth_provider.GuardOAuthProvider(
+        state_path=str(tmp_path / name), issuer=ISSUER, resource_url=RESOURCE,
+        password_env=PASSWORD_ENV)
+
+
+def test_delete_state_file_while_running_keeps_tokens_valid(tmp_path):
+    """撤销口径锚定（与 SECURITY.md 文档一致）：进程运行中删除 oauth_state.json 不撤销任何
+    token——内存密钥继续验签，且下一次注册会以同一密钥重建文件。
+    立即撤销全部 token 的唯一操作 = 停桥 → 删除文件 → 重启（新随机密钥 → 旧 JWT 验签失败）。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        state = str(tmp_path / "oauth_state.json")
+        kw = dict(state_path=state, issuer=ISSUER, resource_url=RESOURCE, password_env=PASSWORD_ENV)
+        p = oauth_provider.GuardOAuthProvider(**kw)
+        client = _mk_oauth_client("c1")
+        await p.register_client(client)
+        code = AuthorizationCode(code="c9", scopes=["mcp"], expires_at=time.time() + 300,
+                                 client_id="c1", code_challenge="x", redirect_uri=CALLBACK,
+                                 redirect_uri_provided_explicitly=True)
+        tok = await p.exchange_authorization_code(client, code)
+        os.remove(state)   # 运行中删除：不撤销（密钥在内存）
+        assert await p.load_access_token(tok.access_token) is not None
+        await p.register_client(_mk_oauth_client("c2"))   # 触发 _save_state → 同一密钥重建文件
+        assert os.path.exists(state)
+        assert await p.load_access_token(tok.access_token) is not None
+        # 不删文件直接重启：同一密钥，token 仍有效（与「删除后重启」形成对照）
+        p2 = oauth_provider.GuardOAuthProvider(**kw)
+        assert await p2.load_access_token(tok.access_token) is not None
+        # 删除后重启：新随机密钥 → 旧 JWT 全部失效
+        os.remove(state)
+        p3 = oauth_provider.GuardOAuthProvider(**kw)
+        assert await p3.load_access_token(tok.access_token) is None
+
+    asyncio.run(scenario())
+
+
+def test_client_limit_refusal_preserves_existing(tmp_path, monkeypatch):
+    """MAX_CLIENTS 上限：拒绝新 DCR 时绝不驱逐既有合法 client；拒绝不落盘，重启免疫不受影响。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        state = str(tmp_path / "oauth_state.json")
+        kw = dict(state_path=state, issuer=ISSUER, resource_url=RESOURCE, password_env=PASSWORD_ENV)
+        p = oauth_provider.GuardOAuthProvider(**kw)
+        await p.register_client(_mk_oauth_client("c1"))
+        monkeypatch.setattr(oauth_provider, "MAX_CLIENTS", 1)
+        with pytest.raises(RegistrationError):
+            await p.register_client(_mk_oauth_client("c2"))
+        assert await p.get_client("c1") is not None
+        # 拒绝不落盘 + 重启免疫：重载后仍恰好 1 个 client
+        p2 = oauth_provider.GuardOAuthProvider(**kw)
+        assert await p2.get_client("c1") is not None
+        assert len(p2._clients) == 1
+
+    asyncio.run(scenario())
+
+
+def test_pending_ttl_pruned_on_next_authorize(tmp_path, monkeypatch):
+    """过期 pending 不无限积累：下一次 authorize 惰性清扫。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        p = _mk_provider(tmp_path)
+        client = _mk_oauth_client()
+        params = _mk_auth_params()
+        monkeypatch.setattr(oauth_provider, "PENDING_TTL", 0)
+        await p.authorize(client, params)
+        assert len(p._pending) == 1
+        await p.authorize(client, params)   # 第二次调用先清扫过期 pending
+        assert len(p._pending) == 1
+
+    asyncio.run(scenario())
+
+
+def test_pending_limit_refusal(tmp_path, monkeypatch):
+    """MAX_PENDING 上限：明确拒绝新请求，不驱逐既有 pending（首个流程不受影响）。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        p = _mk_provider(tmp_path)
+        client = _mk_oauth_client()
+        params = _mk_auth_params()
+        monkeypatch.setattr(oauth_provider, "MAX_PENDING", 1)
+        url1 = await p.authorize(client, params)
+        with pytest.raises(AuthorizeError):
+            await p.authorize(client, params)
+        assert len(p._pending) == 1
+        # 既有 pending 仍可完成登录
+        key1 = url1.split("request=", 1)[1]
+        assert p.complete_authorization(key1, PASSWORD) is not None
+
+    asyncio.run(scenario())
+
+
+def test_expired_code_pruned_and_cannot_exchange(tmp_path):
+    """过期 authorization code 不能 exchange，且不残留内存。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        p = _mk_provider(tmp_path)
+        client = _mk_oauth_client()
+        p._codes["cx"] = AuthorizationCode(
+            code="cx", scopes=[], expires_at=time.time() - 1, client_id="c",
+            code_challenge="x", redirect_uri=CALLBACK, redirect_uri_provided_explicitly=True)
+        assert await p.load_authorization_code(client, "cx") is None
+        assert "cx" not in p._codes
+
+    asyncio.run(scenario())
+
+
+def test_code_limit_refusal(tmp_path, monkeypatch):
+    """MAX_CODES 上限：达到上限拒绝发新码（登录页 401），不驱逐既有码。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        p = _mk_provider(tmp_path)
+        client = _mk_oauth_client()
+        params = _mk_auth_params()
+        url1 = await p.authorize(client, params)
+        key1 = url1.split("request=", 1)[1]
+        r1 = p.complete_authorization(key1, PASSWORD)
+        assert r1 is not None
+        monkeypatch.setattr(oauth_provider, "MAX_CODES", 1)
+        url2 = await p.authorize(client, params)
+        key2 = url2.split("request=", 1)[1]
+        assert p.complete_authorization(key2, PASSWORD) is None   # 上限拒绝 → 401
+        assert len(p._codes) == 1
+        # 既有码不受影响，可正常 exchange
+        assert await p.load_authorization_code(client, r1[1]) is not None
+
+    asyncio.run(scenario())

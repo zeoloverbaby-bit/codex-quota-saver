@@ -7,6 +7,8 @@ import contextlib
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bridge", "guard"))
 import guard_lib  # noqa: E402
 
@@ -113,6 +115,63 @@ def test_write_next_step_function_fixed_path(tmp_path):
     n = guard_lib.write_next_step(str(ws), "# hello\nnext")
     p = ws / ".codex" / "next-step.md"
     assert p.read_text(encoding="utf-8") == "# hello\nnext"
+    assert n > 0
+
+
+# ---- 物理边界：logical path 固定 ≠ physical target 固定（symlink escape 防逃逸）----
+
+def _symlink_or_skip(src, dst, target_is_directory=False):
+    """尽力创建链接；Windows 无特权时：目录回退 junction（mklink /J 免特权），文件链接则 skip。"""
+    try:
+        dst.symlink_to(src, target_is_directory=target_is_directory)
+        return
+    except (OSError, NotImplementedError) as exc:
+        if os.name == "nt" and target_is_directory:
+            import subprocess
+            try:
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                               check=True, capture_output=True)
+                return
+            except subprocess.CalledProcessError:
+                pytest.skip(f"目录链接不可用: {exc}")
+        if os.name == "nt":
+            pytest.skip(f"symlink 不可用（Windows 特权限制）: {exc}")
+        raise
+
+
+def test_write_next_step_rejects_codex_dir_symlink(tmp_path):
+    """威胁 A：<workspace>/.codex 指向外部目录——必须拒绝，外部目录不得出现新文件。"""
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _symlink_or_skip(outside, ws / ".codex", target_is_directory=True)
+    with pytest.raises(guard_lib.NextStepWriteError):
+        guard_lib.write_next_step(str(ws), "escape")
+    assert not (outside / "next-step.md").exists()
+
+
+def test_write_next_step_rejects_file_symlink(tmp_path):
+    """威胁 B：next-step.md 本身指向外部文件——必须拒绝，外部文件内容字节不变。"""
+    ws = tmp_path / "repo"
+    (ws / ".codex").mkdir(parents=True)
+    victim = tmp_path / "victim.md"
+    victim.write_text("SECRET", encoding="utf-8")
+    _symlink_or_skip(victim, ws / ".codex" / "next-step.md")
+    with pytest.raises(guard_lib.NextStepWriteError):
+        guard_lib.write_next_step(str(ws), "overwrite")
+    assert victim.read_text(encoding="utf-8") == "SECRET"
+
+
+def test_write_next_step_workspace_symlink_writes_inside_real_workspace(tmp_path):
+    """workspace 路径本身是 symlink（合法部署形态）：canonicalize 后照常写入真实目录。"""
+    real_ws = tmp_path / "real-ws"
+    real_ws.mkdir()
+    ws_link = tmp_path / "ws-link"
+    _symlink_or_skip(real_ws, ws_link, target_is_directory=True)
+    n = guard_lib.write_next_step(str(ws_link), "# v1")
+    p = real_ws / ".codex" / "next-step.md"
+    assert p.read_text(encoding="utf-8") == "# v1"
     assert n > 0
 
 

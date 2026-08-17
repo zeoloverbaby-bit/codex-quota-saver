@@ -155,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 - **Known upstream bug · #32587（Open，verified_at=2026-08-16）**：子代理可能静默继承父模型。首次 spawn 后必须核对 rollout 实际模型是否为 `gpt-5.6-luna`（验证门槛已写入 AGENTS.md 与 luna-routing skill）
 - **Observed behavior · verified_at=2026-08-16**：App 档位白名单：config 写 `max` 但会话显示 `medium` = App 设置-配置未开启 max 档。**会话实际显示为准**
-- **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-16）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：社区仍报 Luna 被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
+- **Known upstream bug · [#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)（Open，verified_at=2026-08-17）**：官方「Sol 主 + Luna 子」原生模式（2026-08-15 官宣，地面半成品）：`features.multi_agent_v2` 配置键在当前官方源码中存在（Stable 阶段、默认关闭，支持布尔与结构化表两种形态；官方 PR #32751 要求 spawn_agent 模型覆盖与当前 backend 兼容），但社区实测 Luna 仍被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开该坑区——修复落地前不建议换成 Sol 主线程
 - **Observed behavior · verified_at=2026-08-16**：改动 AGENTS.md / config 后必须开新会话才生效
 - **Observed behavior · verified_at=2026-08-16**：v1.5.0 及以前安装会把三层协议追加到全局 `~/.codex/AGENTS.md`。升级到 v1.6.0 后建议迁移：删除全局 AGENTS.md 中旧的两个小节（标记「可整体删除回滚」），改为依赖项目根 `AGENTS.md`（重新运行新 install 写入）
 - **Observed behavior · verified_at=2026-08-17**：ngrok 免费版拦截页（英文「You are about to visit…」警告页）**无法用技术手段跳过**（官方明确禁止注入 skip 头，实测 ERR_NGROK_7096）——新浏览器首次访问桥域名需手动点一次「Visit Site」（cookie 按浏览器持久）。v1.6.4 起启动器在启动 15 秒后自动打开桥密码页预热，把这一步提前到启动时（见 [bridge/README.md](bridge/README.md)）
@@ -164,7 +164,7 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## Roadmap 与稳定 Gate
 
-以下 gate 全部通过前，本仓库保持 Public Alpha；过线后移除 Alpha 标注、发布 stable：
+以下 gate 全部通过前，本仓库保持 Public Alpha（GitHub Release 均为 versioned development release，非 Stable milestone）；全部 Stable Gates 通过后发布首个明确标记为 Stable 的版本：
 
 - [x] 安全边界硬化：MCP 桥能力层白名单 + 自建 OAuth 认证（bridge-guard）已发布
 - [x] Windows + Ubuntu CI 绿（installer / eval / 静态检查 / gitleaks / link check；macOS experimental / 未验证）

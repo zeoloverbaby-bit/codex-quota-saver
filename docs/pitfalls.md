@@ -12,7 +12,7 @@
 
 3. **Defender 会静默隔离 ngrok.exe**：先给安装目录加 Defender 排除项再下载，否则装多少次都被删。
 
-4. **OAuth 授权的连接器，重启服务器就失效**：旧架构签名密钥每次启动随机生成 + 客户端注册表纯内存态——重启即废所有 token，表现为连接器工具全挂 / 401 / TaskGroup 报错。**（v1.6.0 已从设计上根治：bridge-guard 把密钥与 DCR 注册表落盘 `guard/state/oauth_state.json`——重启桥授权依然有效，只有删掉该文件才需重新授权）**
+4. **OAuth 授权的连接器，重启服务器就失效**：旧架构签名密钥每次启动随机生成 + 客户端注册表纯内存态——重启即废所有 token，表现为连接器工具全挂 / 401 / TaskGroup 报错。**（v1.6.0 已从设计上根治：bridge-guard 把密钥与 DCR 注册表落盘 `guard/state/oauth_state.json`——重启桥授权依然有效。要撤销全部已发 token = 停桥 → 删该文件 → 重启；桥运行中删文件无效，密钥在内存里）**
 
 5. **ChatGPT @ 菜单找不到连接器**：@ 列表是对话快照——旧对话永远看不到新连接器。新建对话 + 输入全名。
 
@@ -39,7 +39,7 @@
 
 ## 模型编排期（坑 15）
 
-15. **别急着上「Sol 主 + Luna 子」官方模式**：2026-08-15 官方官宣 Sol 可以编排 Luna 舰队，但社区实测 Luna 仍被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤（[#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)）。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开——想省额度就保持现状，等修复落地再评估。
+15. **别急着上「Sol 主 + Luna 子」官方模式**：2026-08-15 官方官宣 Sol 可以编排 Luna 舰队。`features.multi_agent_v2` 配置键在当前官方源码中存在（Stable 阶段、默认关闭，支持布尔与结构化表两种形态——2026-08-17 复核，source=openai/codex main；早前「配置键查无实据」的结论已更正）。但社区实测 Luna 仍被 Multi Agents V2 的 `spawn_agent` 当 V1 过滤（[#36294](https://github.com/openai/codex/issues/36294) / [#35097](https://github.com/openai/codex/issues/35097)，官方 PR #32751 的 backend 兼容限制所致）。本仓库的「Luna 主 + Luna 子」全程 V1 同版本委派，天然绕开——想省额度就保持现状，等修复落地再评估。
 
 ## 桥加固期（坑 16-19）
 

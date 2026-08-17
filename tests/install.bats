@@ -22,12 +22,55 @@ teardown() { rm -rf "$TESTDIR"; }
   [ "$count" -eq 1 ]
 }
 
-@test "config.toml 已有 [agents] 段时跳过" {
+@test "已有部分 [agents] 表：缺失 key 插入现有表内，不产生第二个表（reconcile Case B）" {
   mkdir -p "$CQS_TEST_CODEX_HOME"
   printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
   bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
-  run grep -c 'default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^\[agents\]' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'default_subagent_model = "gpt-5.6-luna"' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^enabled =' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -qF '# --- codex-quota-saver managed [agents] begin ---' "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
+@test "compatible key：ADOPT 不重复（reconcile Case C）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\ndefault_subagent_model = "gpt-5.6-luna"\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(grep -c '^default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+}
+
+@test "conflict：fail-fast 退出非零、文件字节不变、零 mutation（reconcile Case D）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\ndefault_subagent_model = "other-model"\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  cp "$CQS_TEST_CODEX_HOME/config.toml" "$TESTDIR/config.before"
+  run bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
   [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/config.before" "$CQS_TEST_CODEX_HOME/config.toml"
+  [ ! -f "$CQS_TEST_CODEX_HOME/AGENTS.md" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" ]
+}
+
+@test "mixed：adopt + adopt_stricter + add——只插缺失 key，保留用户更严值（reconcile Case E）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nenabled = true\ndefault_subagent_model = "gpt-5.6-luna"\nmax_concurrent_threads_per_session = 4\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(grep -c '^max_concurrent_threads_per_session' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+  grep -q 'max_concurrent_threads_per_session = 4' "$CQS_TEST_CODEX_HOME/config.toml"
+  ! grep -q 'max_concurrent_threads_per_session = 6' "$CQS_TEST_CODEX_HOME/config.toml"
+  grep -q 'default_subagent_reasoning_effort = "max"' "$CQS_TEST_CODEX_HOME/config.toml"
+  [ "$(grep -c '^default_subagent_model' "$CQS_TEST_CODEX_HOME/config.toml")" -eq 1 ]
+}
+
+@test "已有 [agents] 表 install×2 → uninstall：markers 摘除、用户 key 原样（reconcile Case F）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME"
+  printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/config.toml")" = "$(printf '[agents]\nenabled = true')" ]
 }
 
 @test "uninstall 移除托管块（HTML 标记 + TOML [agents] 段）" {
@@ -110,4 +153,84 @@ teardown() { rm -rf "$TESTDIR"; }
   bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
   [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER MODIFIED VERSION" ]
   [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+}
+
+@test "Case A：覆盖用户文件 ×2 → uninstall 恢复 ORIGINAL 且消费备份（重复安装 provenance）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "ORIGINAL" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 0 ]
+}
+
+@test "Case B：CQS 创建文件 ×2 → uninstall 全部移除（不留空壳）" {
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ ! -f "$CQS_TEST_PROJECT/AGENTS.md" ]
+  [ ! -f "$CQS_TEST_PROJECT/.codex/config.toml" ]
+  [ ! -f "$CQS_TEST_PROJECT/.codex/next-step.md" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/AGENTS.md" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/config.toml" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
+}
+
+@test "Case C：用户已有 project/AGENTS.md + 托管块 ×2 → uninstall 只剩 USER CONTENT" {
+  printf 'USER CONTENT\n' > "$CQS_TEST_PROJECT/AGENTS.md"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ -f "$CQS_TEST_PROJECT/AGENTS.md" ]
+  [ "$(cat "$CQS_TEST_PROJECT/AGENTS.md")" = "USER CONTENT" ]
+}
+
+@test "Case D：CQS 创建 AGENTS + 用户追加内容 ×2 → uninstall 摘块保留用户内容、无空壳" {
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  printf '\nUSER NEW CONTENT\n' >> "$CQS_TEST_PROJECT/AGENTS.md"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ -f "$CQS_TEST_PROJECT/AGENTS.md" ]
+  ! grep -q 'cqs-managed-block' "$CQS_TEST_PROJECT/AGENTS.md"
+  grep -q 'USER NEW CONTENT' "$CQS_TEST_PROJECT/AGENTS.md"
+}
+
+@test "Case E：用户修改后二次安装不得再覆盖，uninstall 保留用户版与备份" {
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  printf 'USER MODIFIED VERSION\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER MODIFIED VERSION" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER MODIFIED VERSION" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+}
+
+@test "Case F：install×3 → uninstall 与 ×1 等价（provenance 不随次数衰减）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "ORIGINAL" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 0 ]
+}
+
+@test "中途失败：旧 manifest 原样保留、journal 留存、本轮改动回滚（bats failure injection）" {
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  cp "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest" "$TESTDIR/manifest.before"
+  printf 'USER AGENTS\n' > "$CQS_TEST_CODEX_HOME/AGENTS.md"
+  rm -f "$CQS_TEST_CODEX_HOME/config.toml" "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  run env CQS_TEST_FAIL_AFTER=3 bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  [ "$status" -ne 0 ]
+  cmp -s "$TESTDIR/manifest.before" "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest"
+  [ -f "$CQS_TEST_CODEX_HOME/.codex-quota-saver-manifest.tmp" ]
+  [ "$(cat "$CQS_TEST_CODEX_HOME/AGENTS.md")" = "USER AGENTS" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/config.toml" ]
+  [ ! -f "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml" ]
 }

@@ -3,7 +3,9 @@
 - tools/list 不得声明 output_schema、响应不含 structured_content（OpenAI 连接器 TaskGroup 崩溃相关）
 - 白名单外的工具调用返回 is_error=True 的标准错误结果，不抛异常、不转发
 """
+import contextlib
 import os
+import tempfile
 
 from mcp.server.lowlevel import Server
 from mcp.types import Tool, TextContent, ListToolsResult, CallToolResult
@@ -24,14 +26,46 @@ WRITE_NEXT_STEP_TOOL = Tool(
 )
 
 
+class NextStepWriteError(Exception):
+    """write_next_step 的安全拒绝：物理目标不是 workspace 内的普通文件。"""
+
+
 def write_next_step(workspace: str, content: str) -> int:
-    """硬编码：只能写 <workspace>/.codex/next-step.md。返回写入字符数。"""
+    """硬编码：只能写 <workspace>/.codex/next-step.md。返回写入字符数。
+
+    物理边界（fail-closed）：
+    - .codex 或 next-step.md 是符号链接 → 拒绝（绝不 follow）；
+    - 解析后的真实父目录必须仍位于 canonical workspace 内——兜底 Windows
+      junction（islink 对 junction 返回 False，但 realpath 会解析它）；
+    - 同目录临时文件 + fsync + os.replace 原子写入：不留半文件，且 rename
+      替换的是目录项本身、不会跟随目标链接。
+    注：检查与写入之间仍有 TOCTOU 窗口；威胁模型是"仓库内已存在的静态链接"，
+    并发本地攻击者的竞态属已知残余风险（见 SECURITY.md）。
+    """
     if not workspace:
         raise ValueError("workspace not configured")
-    p = os.path.join(workspace, NEXT_STEP_REL)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(content)
+    canonical_ws = os.path.realpath(workspace)
+    target_dir = os.path.join(canonical_ws, ".codex")
+    p = os.path.join(target_dir, "next-step.md")
+    if os.path.islink(target_dir):
+        raise NextStepWriteError(".codex 是符号链接：拒绝写入（可能指向 workspace 外）")
+    if os.path.islink(p):
+        raise NextStepWriteError("next-step.md 是符号链接：拒绝覆盖链接目标")
+    os.makedirs(target_dir, exist_ok=True)
+    resolved_parent = os.path.realpath(target_dir)
+    if not (resolved_parent == canonical_ws or resolved_parent.startswith(canonical_ws + os.sep)):
+        raise NextStepWriteError("目标目录解析后超出 workspace 边界，拒绝写入")
+    fd, tmp_name = tempfile.mkstemp(dir=resolved_parent, prefix=".next-step.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, os.path.join(resolved_parent, "next-step.md"))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_name)
+        raise
     return len(content)
 
 
