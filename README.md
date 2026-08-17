@@ -130,12 +130,12 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 
 ## 安装脚本的行为边界（重要）
 
-- **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西
+- **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西（唯一例外：卸载恢复原文件时会把该备份回写后删除——其余 `.bak` 一律保留）
 - `config.toml`：只追加 `[agents]` 段；已有 `[agents]` 则跳过
 - `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容
 - 三层协作协议写入**项目根** `AGENTS.md`（项目级指令），不再追加到全局 `~/.codex/AGENTS.md`——其他仓库不受三层协议影响
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
-- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚；项目数据文件与 .bak 一律保留，不自动删除）
+- 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚：CQS 创建的文件删除、覆盖过的文件恢复原备份；用户原有文件与安装后被修改的文件一律不动、绝不自动覆盖）
 - 每次安装落一份 manifest 到 `~/.codex/.codex-quota-saver-manifest.*`，重复安装幂等
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 

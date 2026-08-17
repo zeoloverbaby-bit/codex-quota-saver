@@ -2,8 +2,9 @@
 # codex-quota-saver installer（macOS / Linux）
 # 用法:
 #   ./install.sh <CODEX_HOME> <PROJECT_PATH> [--dry-run|--uninstall]
-# 行为: 备份不删除; 追加内容带托管标记（可精确回滚）; 项目数据文件绝不覆盖;
-#       manifest 驱动 uninstall/rollback; 幂等（重复安装安全）。
+# 行为: manifest 记录所有权（user/cqs）；追加内容带托管标记；项目数据文件绝不覆盖；
+#       uninstall 按所有权精确回滚——用户原有文件永不删除、CQS 创建文件未改动才删、
+#       覆盖过的文件恢复原备份（消费 .bak）；用户改过的文件一律保留；幂等（重复安装安全）。
 set -euo pipefail
 
 CODEX_HOME="${1:-$HOME/.codex}"

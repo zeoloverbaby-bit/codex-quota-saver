@@ -90,3 +90,24 @@ teardown() { rm -rf "$TESTDIR"; }
   ! grep -q '三层协作协议' "$CQS_TEST_PROJECT/AGENTS.md"
   grep -q 'USER NEW CONTENT' "$CQS_TEST_PROJECT/AGENTS.md"
 }
+
+@test "覆盖用户原文件且未改动：卸载恢复 ORIGINAL 并消费备份（Case 5）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  ! grep -q 'ORIGINAL' "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "ORIGINAL" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 0 ]
+}
+
+@test "覆盖后用户又修改：卸载保留用户修改与备份，不自动覆盖（Case 6）" {
+  mkdir -p "$CQS_TEST_CODEX_HOME/agents"
+  printf 'ORIGINAL\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
+  printf 'USER MODIFIED VERSION\n' > "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml"
+  bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT" --uninstall
+  [ "$(cat "$CQS_TEST_CODEX_HOME/agents/luna-worker.toml")" = "USER MODIFIED VERSION" ]
+  [ "$(find "$CQS_TEST_CODEX_HOME/agents" -name '*.bak-*' | wc -l)" -eq 1 ]
+}

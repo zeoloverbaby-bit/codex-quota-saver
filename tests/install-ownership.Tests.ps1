@@ -104,3 +104,34 @@ Describe '项目级协议 managed block merge（三层协议必须装进已有 A
         $raw -match 'USER NEW CONTENT' | Should -BeTrue
     }
 }
+
+Describe 'CQS 覆盖文件卸载恢复（真 rollback，不靠 hash 删文件）' {
+    It '覆盖用户原文件且未再改动：uninstall 恢复 ORIGINAL 且消费 backup（Case 5）' {
+        $codex = "$TestDrive/codex-rollback"
+        New-Item -ItemType Directory -Force "$codex/agents" | Out-Null
+        $worker = New-Item -ItemType File "$codex/agents/luna-worker.toml"
+        Set-Content $worker -Value 'ORIGINAL' -Encoding UTF8
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-rollback"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex
+        # install 覆盖后文件是 CQS 版本，且生成 backup
+        (Get-Content $worker -Raw -Encoding UTF8) -match 'ORIGINAL' | Should -BeFalse
+        (Get-ChildItem "$codex/agents/*.bak*").Count | Should -Be 1
+        Invoke-Main -Uninstall -CodexHome $codex
+        # 真恢复：当前文件回到 ORIGINAL，backup 被消费（不是删除文件留备份）
+        (Get-Content $worker -Raw -Encoding UTF8).Trim() | Should -Be 'ORIGINAL'
+        (Get-ChildItem "$codex/agents/*.bak*").Count | Should -Be 0
+    }
+    It '覆盖后用户又修改：uninstall 不覆盖用户修改、保留两者并提示人工（Case 6）' {
+        $codex = "$TestDrive/codex-rollback2"
+        New-Item -ItemType Directory -Force "$codex/agents" | Out-Null
+        $worker = New-Item -ItemType File "$codex/agents/luna-worker.toml"
+        Set-Content $worker -Value 'ORIGINAL' -Encoding UTF8
+        $proj = New-Item -ItemType Directory "$TestDrive/proj-rollback2"
+        Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex
+        Set-Content $worker -Value 'USER MODIFIED VERSION' -Encoding UTF8
+        Invoke-Main -Uninstall -CodexHome $codex
+        # 当前文件保持用户修改版本，backup 保留，绝不自动覆盖
+        (Get-Content $worker -Raw -Encoding UTF8).Trim() | Should -Be 'USER MODIFIED VERSION'
+        (Get-ChildItem "$codex/agents/*.bak*").Count | Should -Be 1
+    }
+}
