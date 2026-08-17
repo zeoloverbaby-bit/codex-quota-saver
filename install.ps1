@@ -30,14 +30,18 @@ function Write-Manifest([string]$Path, [array]$Entries) {
     ($Entries | ConvertTo-Json -Depth 4) | Set-Content -Path $Path -Encoding UTF8
 }
 
-# 追加带标记的托管块；幂等：已有该块则跳过。所有返回条目都带 id 与 created（卸载据此精确回滚）
+# 追加带标记的托管块；幂等：已有该块则跳过。
+# 所有返回条目带所有权字段（ownership/created_by_cqs/modified_by_cqs/managed_block_id）——
+# 卸载据此区分「CQS 创建 / CQS 改过 / 用户原有」，绝不按 hash 猜所有权。
 function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$DryRun) {
     $begin = "<!-- cqs-managed-block:$Id begin -->"
     $end   = "<!-- cqs-managed-block:$Id end -->"
     $existed = Test-Path $Path
     if ($existed) {
         $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
-        if ($raw.Contains($begin)) { return @{action='skip';dest=$Path;reason='block-present';id=$Id;created=$false} }
+        if ($raw.Contains($begin)) {
+            return @{action='skip';dest=$Path;reason='block-present';managed_block_id=$Id;ownership='user';created_by_cqs=$false;modified_by_cqs=$true}
+        }
     }
     $block = "`n$begin`n$Content`n$end`n"
     if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
@@ -47,7 +51,9 @@ function Add-ManagedBlock([string]$Path, [string]$Id, [string]$Content, [bool]$D
         Copy-Item $Path $backup -Force
     }
     Add-Content -Path $Path -Value $block -Encoding UTF8
-    return @{action='append';dest=$Path;backup=$backup;id=$Id;created=(-not $existed)}
+    $ownership = 'cqs'; $modified = $false
+    if ($existed) { $ownership = 'user'; $modified = $true }
+    return @{action='append';dest=$Path;backup=$backup;managed_block_id=$Id;ownership=$ownership;created_by_cqs=(-not $existed);modified_by_cqs=$modified}
 }
 
 # 按标记精确移除托管块；无块则跳过。begin/end 可自定义（TOML 段用 # 注释标记）
@@ -78,7 +84,9 @@ max_concurrent_threads_per_session = 6
     $existed = Test-Path $Path
     if ($existed) {
         $raw = "$(Get-Content $Path -Raw -Encoding UTF8)"
-        if ($raw -match '(?m)^\s*\[agents\]') { return @{action='skip';dest=$Path;reason='agents-present';id='agents-toml';created=$false} }
+        if ($raw -match '(?m)^\s*\[agents\]') {
+            return @{action='skip';dest=$Path;reason='agents-present';managed_block_id='agents-toml';ownership='user';created_by_cqs=$false;modified_by_cqs=$true}
+        }
     }
     if ($DryRun) { return @{action='append';dest=$Path;dry=$true} }
     $backup = $null
@@ -87,28 +95,36 @@ max_concurrent_threads_per_session = 6
         Copy-Item $Path $backup -Force
     }
     Add-Content -Path $Path -Value $block -Encoding UTF8
-    return @{action='append';dest=$Path;backup=$backup;id='agents-toml';created=(-not $existed)}
+    $ownership = 'cqs'; $modified = $false
+    if ($existed) { $ownership = 'user'; $modified = $true }
+    return @{action='append';dest=$Path;backup=$backup;managed_block_id='agents-toml';ownership=$ownership;created_by_cqs=(-not $existed);modified_by_cqs=$modified}
 }
 
 # 复制文件；目标存在时：SkipIfExists 绝不覆盖；OverwriteIfChanged 内容相同则跳过。
-# 所有返回条目都带 sha256（skip 时取当前目标哈希），卸载据此判定「未改动才删」。
+# 返回条目带所有权字段；installed_hash 只用于「CQS 创建/改过」条目的卸载判定，
+# skip（用户原有）条目绝不携带哈希——卸载阶段没有「hash 没变就可删」的路径。
 function Install-File([string]$Src, [string]$Dest, [bool]$SkipIfExists, [bool]$OverwriteIfChanged, [bool]$DryRun) {
-    if (Test-Path $Dest) {
-        if ($SkipIfExists) { return @{action='skip';dest=$Dest;reason='exists';sha256=(Get-Sha256 $Dest)} }
+    $existed = Test-Path $Dest
+    if ($existed) {
+        if ($SkipIfExists) {
+            return @{action='skip';dest=$Dest;reason='exists';ownership='user';created_by_cqs=$false;modified_by_cqs=$false}
+        }
         if ($OverwriteIfChanged -and (Get-Sha256 $Src) -eq (Get-Sha256 $Dest)) {
-            return @{action='skip';dest=$Dest;reason='identical';sha256=(Get-Sha256 $Dest)}
+            return @{action='skip';dest=$Dest;reason='identical';ownership='user';created_by_cqs=$false;modified_by_cqs=$false}
         }
     }
     if ($DryRun) { return @{action='copy';dest=$Dest;dry=$true} }
     $dir = Split-Path -Parent $Dest
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
     $backup = $null
-    if (Test-Path $Dest) {
+    if ($existed) {
         $backup = "$Dest.bak-$(Get-Timestamp)"
         Copy-Item $Dest $backup -Force
     }
     Copy-Item $Src $Dest -Force
-    return @{action='copy';dest=$Dest;src=$Src;backup=$backup;sha256=(Get-Sha256 $Dest)}
+    $ownership = 'cqs'; $created = $true; $modified = $false
+    if ($existed) { $ownership = 'user'; $created = $false; $modified = $true }
+    return @{action='copy';dest=$Dest;src=$Src;ownership=$ownership;created_by_cqs=$created;modified_by_cqs=$modified;backup=$backup;installed_hash=(Get-Sha256 $Dest)}
 }
 
 function Invoke-Uninstall([string]$CodexHome) {
@@ -117,39 +133,67 @@ function Invoke-Uninstall([string]$CodexHome) {
     if ($entries.Count -eq 0) { Write-Host '无安装记录，无需卸载。'; return }
     $dirty = $false
     foreach ($e in $entries) {
-        if ($e.id) {
+        # 新格式用 managed_block_id/ownership；旧格式 append 条目用 id（块摘除是安全的，兼容处理）
+        $blockId = $null
+        if ($e.managed_block_id) { $blockId = [string]$e.managed_block_id }
+        elseif ($e.id) { $blockId = [string]$e.id }
+        $legacyCopy = (-not $e.ownership) -and (-not $blockId)
+        if ($blockId) {
+            # 托管块条目：只摘块，绝不触碰块外内容；CQS 创建且摘后为空才删文件
             $tBegin = $null; $tEnd = $null
-            if ($e.id -eq 'agents-toml') {
+            if ($blockId -eq 'agents-toml') {
                 $tBegin = '# --- codex-quota-saver managed [agents] begin ---'
                 $tEnd   = '# --- codex-quota-saver managed [agents] end ---'
             }
-            if ($e.created) {
-                # 该文件由安装创建 → 整删（先确认未混入用户内容：只含托管块则删，否则只摘块）
-                if (Test-Path $e.dest) {
-                    Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
+            if (Test-Path $e.dest) {
+                Remove-ManagedBlock -Path $e.dest -Id $blockId -Begin $tBegin -End $tEnd | Out-Null
+                $createdFlag = $e.created_by_cqs
+                if ($null -eq $createdFlag -and $null -ne $e.created) { $createdFlag = $e.created }
+                if ($createdFlag) {
                     $left = "$(Get-Content $e.dest -Raw -Encoding UTF8)".Trim()
                     if ([string]::IsNullOrEmpty($left)) { Remove-Item $e.dest -Force; Write-Host "已移除（安装创建）: $($e.dest)" }
                     else { Write-Host "含用户内容，保留文件（托管块已摘除）: $($e.dest)" }
                 }
-            } else {
-                Remove-ManagedBlock -Path $e.dest -Id $e.id -Begin $tBegin -End $tEnd | Out-Null
-                Write-Host "托管块已摘除: $($e.dest)"
+                else {
+                    Write-Host "托管块已摘除: $($e.dest)"
+                }
             }
         }
-        elseif ($e.sha256 -and (Test-Path $e.dest)) {
-            # 卸载只删除自安装后未改动、且非项目数据的文件；.bak 一律留给用户
-            $isDataFile = ($e.dest -match 'next-step\.md$|config\.toml$') -and ($e.dest -match '\\.codex\\')
-            if ($isDataFile) { Write-Host "跳过项目数据文件（保留）: $($e.dest)"; continue }
-            if ((Get-Sha256 $e.dest) -eq $e.sha256) {
-                Remove-Item $e.dest -Force
-                Write-Host "已移除: $($e.dest)"
-            } else {
-                $dirty = $true
-                Write-Host "已改动，跳过（备份仍在）: $($e.dest)"
+        elseif ($legacyCopy) {
+            # 旧格式 copy 条目只有 sha256、无所有权证据 → 保守永不删除（fail-safe）
+            if (Test-Path $e.dest) { Write-Host "旧版 manifest 条目（无所有权信息），保守跳过: $($e.dest)" }
+        }
+        elseif ($e.created_by_cqs) {
+            # CQS 创建的文件：自安装后未改动才删；改动则保留
+            if (Test-Path $e.dest) {
+                if ((Get-Sha256 $e.dest) -eq $e.installed_hash) {
+                    Remove-Item $e.dest -Force
+                    Write-Host "已移除（安装创建，未改动）: $($e.dest)"
+                } else {
+                    $dirty = $true
+                    Write-Host "安装后已被修改，保留文件: $($e.dest)"
+                }
             }
+        }
+        elseif ($e.modified_by_cqs -and $e.backup) {
+            # CQS 覆盖过用户原文件：未改动 → 恢复原文件并消费 backup；改动 → 保留两者提示人工
+            if (Test-Path $e.dest) {
+                if ((Get-Sha256 $e.dest) -eq $e.installed_hash) {
+                    Copy-Item $e.backup $e.dest -Force
+                    Remove-Item $e.backup -Force
+                    Write-Host "已恢复原文件（备份已消费）: $($e.dest)"
+                } else {
+                    $dirty = $true
+                    Write-Host "安装后已被修改，保留当前文件与备份，请人工处理: $($e.dest) / $($e.backup)"
+                }
+            }
+        }
+        else {
+            # ownership=user 且 CQS 未修改（skip 条目）：无论 hash 如何，永不删除
+            if (Test-Path $e.dest) { Write-Host "用户原有文件，跳过（不删除）: $($e.dest)" }
         }
     }
-    if ($dirty) { Write-Host "部分文件已改动未删除；manifest 保留备查: $ManifestPath" }
+    if ($dirty) { Write-Host "部分文件已改动未处理；manifest 保留备查: $ManifestPath" }
     else { Remove-Item $ManifestPath -Force -ErrorAction SilentlyContinue; Write-Host "已清除安装记录（干净卸载）。" }
     Write-Host "卸载完成。.bak 备份文件未删除，请自行处理。"
 }
