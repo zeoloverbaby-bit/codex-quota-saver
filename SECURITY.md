@@ -1,6 +1,6 @@
 # Security
 
-## 当前边界（截至 v1.5.0，如实声明）
+## 历史边界（v1.5.0 及以前，如实声明）
 
 MCP 桥的安全边界是 **prompt 约束 + OAuth 认证**，不是能力约束：上游 coding-tools-mcp 不提供工具白名单，`apply_patch`/`exec_command` 在能力层可用，仅靠分析层指令约束模型不使用。
 

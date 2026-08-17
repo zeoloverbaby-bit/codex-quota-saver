@@ -1,6 +1,6 @@
 # COMPATIBILITY 兼容性矩阵
 
-> Last verified: 2026-08-16。高速变化领域，本文件随每次实测更新；「今天实测成功」不自动推出「clone 后成功」，请对照本矩阵。
+> Last verified: 2026-08-17。高速变化领域，本文件随每次实测更新；「今天实测成功」不自动推出「clone 后成功」，请对照本矩阵。
 
 | 项 | 版本 / 环境 | 状态 | 备注 |
 |---|---|---|---|
@@ -11,7 +11,7 @@
 | macOS | — | ⚠️ experimental | 未验证 |
 | Codex | App / CLI（2026-08 实测档） | ✅ 实测 | 见 README 已知问题（#32587 / #36294 / #35097） |
 | ChatGPT 连接器 | 认证方式只有 OAuth / 无身份验证 / 混合（2026-08-17 实测） | ✅ 实测 | 无 API key 选项 → bridge-guard 自建 OAuth 2.1（授权码 + PKCE + DCR）接入 |
-| mcp SDK（guard） | 2.0.0（pin）+ pyjwt 2.13.0（pin） | ✅ 实测 | 12 个测试含端到端 OAuth 全流程（DCR → 密码页 → PKCE → Bearer 调 MCP） |
+| mcp SDK（guard） | 2.0.0（pin）+ pyjwt 2.13.0（pin） | ✅ 实测 | OAuth 端到端回归测试覆盖全流程（DCR → 密码页 → PKCE → Bearer 调 MCP）+ 重启免疫 |
 
 ## 已知不兼容 / 注意
 
