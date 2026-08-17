@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-08-17
+
 ### Security
 - installer ownership hardening（P0）：manifest 记录文件所有权（ownership / created_by_cqs / modified_by_cqs / installed_hash / managed_block_id）——修复「用户原有文件被 skip 后，卸载因 hash 没变而误删」的数据所有权缺陷（实测命中 `<project>/AGENTS.md`）；双平台语义一致，旧格式 manifest 条目保守不删（fail-safe）
 - OAuth state 权限边界：状态文件移入 `bridge/guard/state/`（Windows 目录 ACL 收紧到当前用户、POSIX 目录 0700 / 文件 600）；setup 重跑自动迁移旧 `oauth_state.json`（授权不失效，无需重新授权）
