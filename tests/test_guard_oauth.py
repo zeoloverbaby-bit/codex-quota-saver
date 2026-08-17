@@ -461,6 +461,37 @@ def _mk_provider(tmp_path, name="s.json"):
         password_env=PASSWORD_ENV)
 
 
+def test_delete_state_file_while_running_keeps_tokens_valid(tmp_path):
+    """撤销口径锚定（与 SECURITY.md 文档一致）：进程运行中删除 oauth_state.json 不撤销任何
+    token——内存密钥继续验签，且下一次注册会以同一密钥重建文件。
+    立即撤销全部 token 的唯一操作 = 停桥 → 删除文件 → 重启（新随机密钥 → 旧 JWT 验签失败）。"""
+    async def scenario():
+        os.environ[PASSWORD_ENV] = PASSWORD
+        state = str(tmp_path / "oauth_state.json")
+        kw = dict(state_path=state, issuer=ISSUER, resource_url=RESOURCE, password_env=PASSWORD_ENV)
+        p = oauth_provider.GuardOAuthProvider(**kw)
+        client = _mk_oauth_client("c1")
+        await p.register_client(client)
+        code = AuthorizationCode(code="c9", scopes=["mcp"], expires_at=time.time() + 300,
+                                 client_id="c1", code_challenge="x", redirect_uri=CALLBACK,
+                                 redirect_uri_provided_explicitly=True)
+        tok = await p.exchange_authorization_code(client, code)
+        os.remove(state)   # 运行中删除：不撤销（密钥在内存）
+        assert await p.load_access_token(tok.access_token) is not None
+        await p.register_client(_mk_oauth_client("c2"))   # 触发 _save_state → 同一密钥重建文件
+        assert os.path.exists(state)
+        assert await p.load_access_token(tok.access_token) is not None
+        # 不删文件直接重启：同一密钥，token 仍有效（与「删除后重启」形成对照）
+        p2 = oauth_provider.GuardOAuthProvider(**kw)
+        assert await p2.load_access_token(tok.access_token) is not None
+        # 删除后重启：新随机密钥 → 旧 JWT 全部失效
+        os.remove(state)
+        p3 = oauth_provider.GuardOAuthProvider(**kw)
+        assert await p3.load_access_token(tok.access_token) is None
+
+    asyncio.run(scenario())
+
+
 def test_client_limit_refusal_preserves_existing(tmp_path, monkeypatch):
     """MAX_CLIENTS 上限：拒绝新 DCR 时绝不驱逐既有合法 client；拒绝不落盘，重启免疫不受影响。"""
     async def scenario():

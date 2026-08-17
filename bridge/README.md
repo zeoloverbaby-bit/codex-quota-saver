@@ -15,7 +15,7 @@ ChatGPT 连接器 → ngrok → bridge-guard（OAuth 认证 + 白名单 + write_
 - `apply_patch` / `exec_command` 及一切变更类工具在**协议层不存在**——模型连「想按」的机会都没有
 - 认证：guard **自建 OAuth 2.1 授权服务器**（授权码 + PKCE + DCR）。为什么不用 API key：ChatGPT 连接器的认证下拉只有 OAuth / 无身份验证 / 混合三种（2026-08-17 实测），发不了静态 API key 头
 - 授权流程：连接器发起 OAuth → 浏览器打开 guard 的密码页 → 输入部署时生成的 OAuth 密码 → 拿到 access token（HS256 JWT，7 天有效）
-- **重启免疫**：客户端注册表与签名密钥落盘 `guard/state/oauth_state.json`（状态目录 ACL 收紧/0700，文件 600），重启桥不失效（旧桥「重启即全断」的坑从设计上根治）；只有删除该文件才需重新授权
+- **重启免疫**：客户端注册表与签名密钥落盘 `guard/state/oauth_state.json`（状态目录 ACL 收紧/0700，文件 600），重启桥不失效（旧桥「重启即全断」的坑从设计上根治）。撤销全部已发 token = **停桥 → 删除该文件 → 重启桥**（进程运行中删除无效——密钥在内存，且会以同一密钥重建文件）；`/revoke` 端点为 no-op，撤销靠 7 天 TTL 兜底（见 [SECURITY.md](../SECURITY.md)）
 - 上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不经命令行参数/argv）；上游不开 OAuth、不对外——认证全在 guard 层；token 仍存在于本机进程环境块（同权限/高权限本机进程可见），upstream 仅绑定 127.0.0.1
 - secrets 落 `.secrets.local.env`（POSIX chmod 600 / Windows icacls 当前用户），已 gitignore
 - 残余风险（如实声明）：guard 挡的是能力面；仓库内容本身仍是模型输入，prompt injection 的理论残余风险见 [SECURITY.md](../SECURITY.md)
