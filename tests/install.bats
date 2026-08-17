@@ -22,15 +22,6 @@ teardown() { rm -rf "$TESTDIR"; }
   [ "$count" -eq 1 ]
 }
 
-@test "DEBUG 临时：reconcile 内部状态跟踪（排查用，随后删除）" {
-  mkdir -p "$CQS_TEST_CODEX_HOME"
-  printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"
-  run env CQS_TEST_DEBUG=1 bash "$BATS_TEST_DIRNAME/../install.sh" "$CQS_TEST_CODEX_HOME" "$CQS_TEST_PROJECT"
-  echo "STATUS=$status" >&2
-  echo "$output" | grep -E 'DEBUG|Conflict|reconcile|Current' >&2
-  [ 1 -eq 0 ]   # 恒失败：强制显示输出
-}
-
 @test "已有部分 [agents] 表：缺失 key 插入现有表内，不产生第二个表（reconcile Case B）" {
   mkdir -p "$CQS_TEST_CODEX_HOME"
   printf '[agents]\nenabled = true\n' > "$CQS_TEST_CODEX_HOME/config.toml"

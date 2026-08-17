@@ -150,15 +150,12 @@ remove_managed_block() { # $1=file $2=id [$3=begin $4=end]（默认 HTML 注释�
 # 四态：missing→ADD / 相同→ADOPT / 更严但满足不变量→ADOPT_STRICTER / 破坏不变量→CONFLICT。
 # 期望值运行时读自 global/config-agents.toml（source of truth）；冲突 = fail-fast
 # （preflight 在任何 mutation 前终止）；文本补丁只在现有表头后插 markers+缺失 keys。
-agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号；先剥 CR 再解析——防 CRLF 破坏行处理）
-  tr -d '\r' < "$REPO_ROOT/global/config-agents.toml" | awk '
-    /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ { inagents=1; next }
-    inagents && /^[[:space:]]*\[/ { exit }
-    inagents && /^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=/ {
-      sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*=/, "\t"); sub(/[[:space:]]*$/, "")
-      print
-    }
-  '
+agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号）。
+  # span 选择用 awk（仅行匹配无替换）；key=value 切分用 sed BRE——避开 mawk sub()
+  # 的替换语义（现场：mawk 的 sub(/[[:space:]]*=/, "\t") 只吃掉 =、留下前导空格，
+  # 导致期望值带空格、全部误判冲突）。
+  agents_span "$REPO_ROOT/global/config-agents.toml" \
+    | sed -n "s/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=[[:space:]]*\([^[:space:]].*[^[:space:]]\|[^[:space:]]\)[[:space:]]*$/\1$(printf '\t')\2/p"
 }
 
 agents_span() { # $1=file —— [agents] 表头之后的 span 行（到下一表头为止；剥 CR）
