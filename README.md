@@ -66,7 +66,7 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 
 - **ChatGPT 账号**：Plus 或 Pro 均可（Pro 的网页额度更充裕）；**未充值的账号也能跑**，只是网页 GPT 与 Codex 的模型选择里都没有 Sol 档，方案退化为「Luna 为主 + 人把关」
 - **Codex**：App 或 CLI 都行（App 免费额度 / CLI 订阅额度都能用这套编排）
-- Windows 建议 PowerShell 5.1+；macOS/Linux 用 bash 脚本
+- **平台支持边界（部署前先看这条，详见 [COMPATIBILITY.md](COMPATIBILITY.md)）**：**Windows 推荐**（install.ps1 / bridge setup.ps1 全路径实测）；**Linux**：install.sh 已在 CI 实机验证，bridge/setup.sh 尚未真实部署；**macOS experimental**（未验证）。Windows 建议 PowerShell 5.1+，Linux/macOS 用 bash 脚本
 
 ### 第 1 步 · 安装工具包
 
@@ -81,7 +81,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 ```
 
 ```bash
-# macOS / Linux（参数：CODEX_HOME、项目路径）
+# Linux（参数：CODEX_HOME、项目路径；macOS experimental，见 COMPATIBILITY.md）
 ./install.sh ~/.codex /path/to/your/repo
 ```
 
@@ -98,11 +98,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok静态域名> -Workspace <项目路径>
-# macOS / Linux
+# Linux（macOS experimental，见 COMPATIBILITY.md）
 ./bridge/setup.sh <你的ngrok静态域名> <项目路径>
 ```
 
-一条命令自动装完依赖、生成密钥、自动注册连接器（DCR，无需捕获任何参数）；你全程只需两件事（脚本会提示时机）：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
+一条命令自动装完依赖、生成密钥；**连接器由你在 ChatGPT 创建**，首次 OAuth 连接时通过 DCR 自动完成 OAuth client 注册（无需捕获任何参数）。你全程只需两件事（脚本会提示时机）：在 ChatGPT 创建连接器、最后输一次 OAuth 密码。
 
 > 授权时若浏览器弹出英文警告页（ngrok 免费版拦截页「You are about to visit…」）：**点一次 Visit Site** 即可，cookie 持久、之后不再出现。桥启动 15 秒后会自动打开浏览器到桥密码页预热这一步（v1.6.4 起）。
 
