@@ -27,10 +27,11 @@ Describe 'Tighten-Acl' {
     }
 }
 
-Describe 'Launcher 模板回归（v1.6.2：env 加载 + 二重启动防护）' {
+Describe 'Launcher 模板回归（v1.6.2：env 加载 + 二重启动防护；v1.6.4：预热行）' {
     BeforeAll {
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $setupSource = Get-Content "$repoRoot/bridge/setup.ps1" -Raw -Encoding UTF8
+        $shSource = Get-Content "$repoRoot/bridge/setup.sh" -Raw -Encoding UTF8
     }
     It 'env 文件内容模板纯 ASCII（2026-08-17 根因：非 ASCII 字节破坏 cmd for /f 在 GBK 系统的读取，变量全部加载失败）' {
         $line = ($setupSource -split "`n" | Where-Object { $_ -match 'Write-Utf8NoBom \$EnvFile' }) -join "`n"
@@ -56,6 +57,13 @@ if defined CQS_UPSTREAM_TOKEN (echo TOKEN_OK>"{1}") else (echo TOKEN_MISSING>"{1
     It 'launcher 模板含二重启动防护（端口占用时提示而不是抢端口报错）' {
         $setupSource -match 'netstat -ano \| findstr' | Should -BeTrue
         $setupSource -match 'Bridge is already running' | Should -BeTrue
+    }
+    It 'launcher 模板含预热行（v1.6.4：延迟 15s 自动打开浏览器到密码页——ngrok 拦截页的「点一次」从用到时提前到启动时，官方禁止技术手段跳过）' {
+        $setupSource -match 'WindowStyle Hidden' | Should -BeTrue
+        $setupSource -match 'Start-Sleep -Seconds 15' | Should -BeTrue
+        $setupSource -match 'https://\$Domain/auth/login' | Should -BeTrue
+        $shSource -match 'xdg-open "https://\$DOMAIN/auth/login"' | Should -BeTrue
+        $shSource -match 'sleep 15' | Should -BeTrue
     }
     It '二重启动防护功能：端口占用时提示 already running 并退出（块内 echo 无括号——括号会提前终结 if 块，2026-08-17 实测根因）' {
         $job = Start-Job -ScriptBlock {

@@ -104,6 +104,8 @@ UP_PID=\$!
 "$BRIDGE_DIR/guard/.venv/bin/python" "$BRIDGE_DIR/guard/guard.py" --config "$GUARD_CONF" &
 GUARD_PID=\$!
 trap 'kill \$UP_PID \$GUARD_PID 2>/dev/null || true' EXIT
+# v1.6.4 预热：ngrok 免费版拦截页只能浏览器手动点一次（cookie 持久）；启动 15s 后自动打开密码页，把「点一次」提前到启动时
+( sleep 15; xdg-open "https://$DOMAIN/auth/login" >/dev/null 2>&1 || open "https://$DOMAIN/auth/login" >/dev/null 2>&1 ) &
 ngrok http --url="$DOMAIN" $GUARD_PORT
 EOF
 chmod 700 "$LAUNCHER"
