@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 语义化版本。历史条目从仓库 commit 重建。
 
-## [Unreleased]
+## [1.6.6] - 2026-08-17
 
 ### Security
 - write_next_step 物理边界防逃逸（P0）：`.codex` / `next-step.md` 为符号链接时 fail-closed 拒绝（绝不 follow），realpath 边界包含检查兜底 Windows junction；写入改为同目录临时文件 + fsync + `os.replace` 原子写（实测修复前 junction 逃逸可把内容写进 workspace 外）
@@ -18,6 +18,7 @@
 - 文档事实修正（2026-08-17 官方源码复核）：`features.multi_agent_v2` 配置键存在（布尔/结构化表两种形态，Stable 阶段、默认关闭）——旧「查无实据」结论更正；Stable contract 与 Known upstream bug（#36294/#35097 Open，PR #32751 backend 兼容限制）分层表达
 - README release 口径：Public Alpha 期间 GitHub Release 均为 versioned development release；全部 Stable Gates 通过后发布首个明确标记为 Stable 的版本
 - eval/README mini-ops 数字标注「设计目标，基准仓库尚未构建」；CHANGELOG v1.6.5 移除与同版本「易漂移计数移除」相矛盾的措辞
+- installer bash 侧健壮性（CI 现场迭代）：dry-run 不再提交不存在的 journal；[agents] span 提取改 awk 标志循环（消除 sed range 端点匹配表头导致的塌缩）；期望值切分避开 mawk sub() 替换语义；剥 CR 防 CRLF 行处理破坏；调试钩子恒零返回（防 set -e 击落）
 
 ## [1.6.5] - 2026-08-17
 
