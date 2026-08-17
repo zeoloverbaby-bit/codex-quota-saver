@@ -64,6 +64,14 @@ url = "x"
         $p = Get-AgentsReconcilePlan -Raw "[agents]`nenabled = `"multi`nline`"`n" -Desired $script:desired
         $p.writer_supported | Should -BeFalse
     }
+    It 'threads lower bound（官方 schema minimum=1）：0 → conflict，-1 → conflict，1 → adopt_stricter' {
+        $p0 = Get-AgentsReconcilePlan -Raw "[agents]`nmax_concurrent_threads_per_session = 0`n" -Desired $script:desired
+        $p0.states['max_concurrent_threads_per_session'] | Should -Be 'conflict'
+        $pN = Get-AgentsReconcilePlan -Raw "[agents]`nmax_concurrent_threads_per_session = -1`n" -Desired $script:desired
+        $pN.states['max_concurrent_threads_per_session'] | Should -Be 'conflict'
+        $p1 = Get-AgentsReconcilePlan -Raw "[agents]`nmax_concurrent_threads_per_session = 1`n" -Desired $script:desired
+        $p1.states['max_concurrent_threads_per_session'] | Should -Be 'adopt_stricter'
+    }
 }
 
 Describe 'Merge-AgentsToml（key 级 reconciliation）' {

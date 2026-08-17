@@ -84,8 +84,17 @@ def make_guard(upstream_session, allowlist: set, workspace: str) -> Server:
         name = params.name
         arguments = params.arguments or {}
         if name == "write_next_step":
-            # 只读 content；任何 path 参数一律忽略——路径由服务端固定
-            n = write_next_step(workspace, arguments.get("content", ""))
+            # 只读 content；任何 path 参数一律忽略——路径由服务端固定。
+            # 安全拒绝（符号链接/边界逃逸）→ 标准工具错误结果（is_error=True），
+            # 绝不冒到协议层：JSON-RPC error 会让连接器把会话当失败（bridge 可用性故障）。
+            # 只捕获预期安全拒绝类型；其余异常按 SDK 错误策略上抛（不吞内部 bug）。
+            try:
+                n = write_next_step(workspace, arguments.get("content", ""))
+            except NextStepWriteError as exc:
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"write_next_step rejected: {exc}")],
+                    is_error=True,
+                )
             return CallToolResult(
                 content=[TextContent(type="text", text=f"written {n} chars to {NEXT_STEP_REL}")],
                 is_error=False,

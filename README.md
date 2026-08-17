@@ -131,12 +131,12 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 ## 安装脚本的行为边界（重要）
 
 - **备份不删除**：任何被改写的既有文件先复制为 `<文件>.bak-<时间戳>`，不删除任何东西（唯一例外：卸载恢复原文件时会把该备份回写后删除——其余 `.bak` 一律保留）
-- `config.toml`：只追加 `[agents]` 段；已有 `[agents]` 则跳过
-- `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容
+- `config.toml`：[agents] 采用窄 key 级语义调和（不整文件序列化）：缺失 key 由 CQS 托管区（managed markers）补齐；相同值 ADOPT；用户更严且满足 CQS 不变量的值 ADOPT_STRICTER（线程上限下界 = 官方 schema minimum 1）；冲突用户值 CONFLICT fail-fast（任何落盘前终止）；CQS 托管区自身可随新版本升级，你改过托管区则绝不覆盖并明确报告
+- `AGENTS.md`：只追加子代理硬规则一个托管块（带 `cqs-managed-block` 标记），**不再包含三层协作协议**；不覆盖你原有内容；新版本模板会安全升级该块（你改过块内内容则保留并提示）
 - 三层协作协议写入**项目根** `AGENTS.md`（项目级指令），不再追加到全局 `~/.codex/AGENTS.md`——其他仓库不受三层协议影响
 - 项目级 `config.toml` / `next-step.md`：已存在则**跳过并提示**（绝不覆盖你的真实任务数据）
 - 支持 `--dry-run`（演练，零落盘）/ `--uninstall`（按 manifest 精确回滚：CQS 创建的文件删除、覆盖过的文件恢复原备份；用户原有文件与安装后被修改的文件一律不动、绝不自动覆盖）
-- 每次安装落一份 manifest 到 `~/.codex/.codex-quota-saver-manifest.*`，重复安装幂等
+- 持久 provenance ledger 落 `~/.codex/.codex-quota-saver-manifest`：重复安装合并旧条目（created/modified 只增不减、backup 身份只保留第一份 origin），全部步骤成功才原子提交，重复安装与跨版本升级均幂等
 - 仓库里没有任何密钥、域名、个人信息——脚本也不碰任何凭据文件
 
 ## 部署完成后，每天就 5 步

@@ -18,6 +18,8 @@ if [ "$MODE" = "install" ] && [ "$PROJECT_PATH" = "--uninstall" ]; then MODE="--
 if [ "$MODE" = "install" ] && [ "$PROJECT_PATH" = "--dry-run" ]; then MODE="--dry-run"; PROJECT_PATH=""; fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 测试 seam：CQS_TEST_SOURCE_ROOT 指向 staged source 树（S1/S2 升级场景）；默认脚本所在目录
+SOURCE_ROOT="${CQS_TEST_SOURCE_ROOT:-$REPO_ROOT}"
 MANIFEST="$CODEX_HOME/.codex-quota-saver-manifest"
 # provenance 合并需要旧 manifest 安装全程可读：写入只进 journal，成功后才原子提交
 MANIFEST_JOURNAL="$MANIFEST.tmp"
@@ -60,6 +62,7 @@ manifest_field() { # $1=line $2=field —— 与 do_uninstall 的解析口径一
     created_by_cqs) printf '%s' "$line" | sed -n 's/.*\bcreated_by_cqs=\([^[:space:]]*\).*/\1/p' ;;
     modified_by_cqs) printf '%s' "$line" | sed -n 's/.*\bmodified_by_cqs=\([^[:space:]]*\).*/\1/p' ;;
     installed_hash) printf '%s' "$line" | sed -n 's/.*\binstalled_hash=\([^[:space:]]*\).*/\1/p' ;;
+    installed_block_hash) printf '%s' "$line" | sed -n 's/.*\binstalled_block_hash=\([^[:space:]]*\).*/\1/p' ;;
     *) printf '' ;;
   esac
 }
@@ -80,9 +83,15 @@ maybe_fail() { # $1=step —— 测试专用失败注入钩子（CQS_TEST_FAIL_A
 }
 
 # 本轮 mutation 追踪（partial failure 回滚用；换行分隔以兼容路径含空格）
+# BACKUPS_THIS_RUN = 本轮铸造的 origin 备份（失败时恢复并消费）
+# TXN_BACKUPS_THIS_RUN = 本轮覆盖前的 txn 快照（升级 S1→S2 等；失败恢复、成功消费，绝不进 manifest）
+# CREATED_THIS_RUN = 本轮新创建的文件（失败时删除）
 BACKUPS_THIS_RUN=""
+TXN_BACKUPS_THIS_RUN=""
 CREATED_THIS_RUN=""
 track_backup() { BACKUPS_THIS_RUN="$BACKUPS_THIS_RUN
+$1"; }
+track_txn_backup() { TXN_BACKUPS_THIS_RUN="$TXN_BACKUPS_THIS_RUN
 $1"; }
 track_created() { CREATED_THIS_RUN="$CREATED_THIS_RUN
 $1"; }
@@ -99,6 +108,15 @@ on_exit_failure() {
         if [ -f "$b" ] && [ -f "$d" ]; then cp -p "$b" "$d" && rm -f "$b" && log "已回滚: $d"; fi
       done <<EOF
 $BACKUPS_THIS_RUN
+EOF
+    fi
+    if [ -n "$TXN_BACKUPS_THIS_RUN" ]; then
+      while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        d="${b%.bak-*}"
+        if [ -f "$b" ] && [ -f "$d" ]; then cp -p "$b" "$d" && rm -f "$b" && log "已回滚(升级前版本): $d"; fi
+      done <<EOF
+$TXN_BACKUPS_THIS_RUN
 EOF
     fi
     if [ -n "$CREATED_THIS_RUN" ]; then
@@ -119,28 +137,71 @@ trap on_exit_failure EXIT
 block_begin() { echo "<!-- cqs-managed-block:$1 begin -->"; }
 block_end()   { echo "<!-- cqs-managed-block:$1 end -->"; }
 
+block_body_hash() { # $1=file $2=begin $3=end → 块体 sha256（awk 行重建：content 末尾补一个 \n 的规范口径，
+  # 与写入格式 `printf '\n'; begin; cat content; end; printf '\n'` 的提取结果一致）
+  awk -v b="$2" -v e="$3" '!seen && index($0,b)>0 { seen=1; next } seen && index($0,e)>0 { exit } seen { print }' "$1" \
+    | sha256sum | cut -d' ' -f1
+}
+
+block_content_hash() { # $1=content-file → 与 block_body_hash 同口径：awk 行重建（末行同样补 \n）
+  awk '{print}' "$1" | sha256sum | cut -d' ' -f1
+}
+
 add_managed_block() { # $1=file $2=id $3=content-file
-  local prev="" pcreated="" pbackup=""
+  local prev="" pcreated="" pbackup="" pblockhash="" newhash=""
   prev="$(prev_line "$1")"
   [ -z "$prev" ] || pcreated="$(manifest_field "$prev" created_by_cqs)"
   [ -z "$prev" ] || pbackup="$(manifest_field "$prev" backup)"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
+  newhash="$(block_content_hash "$3")"
   if [ -f "$1" ] && grep -qF "$(block_begin "$2")" "$1"; then
-    log "skip (block present): $1"
-    # 生命周期幂等：旧 created/backup 保留（Rule A/B/E），绝不降级
-    manifest_add "append" "$1" "managed_block_id=$2" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$pbackup"
+    # 块已存在：按 installed_block_hash 区分 幂等 skip / 用户改过（不覆盖）/ 模板升级
+    local created=0 modified=1 ownership="user"
+    [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+    if [ -z "$pblockhash" ]; then
+      log "托管块 $2 存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$pbackup"
+      return
+    fi
+    if [ "$(block_body_hash "$1" "$(block_begin "$2")" "$(block_end "$2")")" != "$pblockhash" ]; then
+      log "托管块 $2 已被用户修改，保留不覆盖（如需升级请先手动处理该块）: $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    if [ "$newhash" = "$pblockhash" ]; then
+      log "skip (block present): $1"
+      manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    # 块体未被用户修改且模板已升级 → 替换块体（同一 txn：先快照后摘旧写新）
+    if [ "$MODE" = "--dry-run" ]; then log "dry-run block upgrade: $1"; return; fi
+    local txn=""
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    remove_managed_block "$1" "$2"
+    { printf '\n'; block_begin "$2"; cat "$3"; block_end "$2"; printf '\n'; } >> "$1"
+    manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newhash" "backup=$pbackup"
+    log "upgrade block: $1"
     return
   fi
   if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
-  local existed=0 created=1 modified=0 ownership="cqs" backup=""
+  # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（同 install_file 的 origin/txn 分离）
+  local existed=0 created=1 modified=0 ownership="cqs" backup="" txn=""
   [ -f "$1" ] && existed=1
   if [ "$existed" = "1" ]; then
-    if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
-    created=0; modified=1; ownership="user"
+    if [ "$pcreated" = "1" ]; then
+      txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    elif [ -n "$pbackup" ]; then
+      backup="$pbackup"; created=0; modified=1; ownership="user"
+      txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    else
+      backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+      created=0; modified=1; ownership="user"
+    fi
   else
     track_created "$1"
   fi
   { printf '\n'; block_begin "$2"; cat "$3"; block_end "$2"; printf '\n'; } >> "$1"
-  manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
+  manifest_add "append" "$1" "managed_block_id=$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newhash" "backup=$backup"
   log "append block: $1"
 }
 
@@ -161,7 +222,7 @@ agents_desired() { # 输出 "key<TAB>raw值" 行（raw 原样保留引号）。
   # span 选择用 awk（仅行匹配无替换）；key=value 切分用 sed BRE——避开 mawk sub()
   # 的替换语义（现场：mawk 的 sub(/[[:space:]]*=/, "\t") 只吃掉 =、留下前导空格，
   # 导致期望值带空格、全部误判冲突）。
-  agents_span "$REPO_ROOT/global/config-agents.toml" \
+  agents_span "$SOURCE_ROOT/global/config-agents.toml" \
     | sed -n "s/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=[[:space:]]*\([^[:space:]].*[^[:space:]]\|[^[:space:]]\)[[:space:]]*$/\1$(printf '\t')\2/p"
 }
 
@@ -176,6 +237,31 @@ agents_span() { # $1=file —— [agents] 表头之后的 span 行（到下一�
 agents_span_value() { # $1=file $2=key → [agents] span 内该 key 的原始值；未找到→空
   agents_span "$1" | grep -E "^[[:space:]]*$2[[:space:]]*=" | head -n 1 \
     | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*#[^"]*$//' | sed 's/[[:space:]]*$//'
+}
+
+agents_region_keys() { # $1=file $2=begin $3=end → CQS 托管区（markers 之间）的 key 名，TAB 分隔
+  awk -v b="$2" -v e="$3" '!seen && index($0,b)>0 { seen=1; next } seen && index($0,e)>0 { exit } seen { print }' "$1" \
+    | sed -n 's/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=.*$/\1/p' | tr '\n' '\t'
+}
+
+agents_span_keys() { # $1=file → [agents] span 全部 key 名（含托管区），TAB 分隔
+  agents_span "$1" | sed -n 's/^[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\)[[:space:]]*=.*$/\1/p' | tr '\n' '\t'
+}
+
+in_word_list() { # $1=word $2=TAB 分隔列表 → 命中 0 / 未命中 1
+  local w="$1" list="$2"
+  [ -n "$w" ] || return 1
+  case "$list" in *"$w"*) return 0 ;; *) return 1 ;; esac
+}
+
+count_in() { # $1=word $2=空白分隔列表 → 出现次数
+  local w="$1" n=0 key
+  for key in $2; do [ "$key" = "$w" ] && n=$((n+1)); done
+  echo "$n"
+}
+
+agents_region_hash_of() { # $1=region-text → 与 block_body_hash 同口径（awk 行重建：末行补 \n）
+  printf '%s' "$1" | awk '{print}' | sha256sum | cut -d' ' -f1
 }
 
 agents_classify() { # $1=key $2=desiredRaw $3=currentRaw(空=missing) → add|adopt|adopt_stricter|conflict|manual
@@ -193,6 +279,7 @@ agents_classify() { # $1=key $2=desiredRaw $3=currentRaw(空=missing) → add|ad
     max_concurrent_threads_per_session)
       case "$c" in *[!0-9]*|"") echo "manual"; return ;; esac
       ci="$c"; di="$d"
+      if [ "$ci" -lt 1 ]; then echo "conflict"; return; fi   # 官方 schema minimum=1（0 是启动错误）
       if [ "$ci" -eq "$di" ]; then echo "adopt"; return; fi
       if [ "$ci" -lt "$di" ]; then echo "adopt_stricter"; return; fi   # 更严上限满足 ≤desired 不变量
       echo "conflict"
@@ -211,13 +298,44 @@ agents_key_impact() {
   esac
 }
 
-agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析 → exit 1
-  local f="$1" k d c st conflicts=0 desired=""
+agents_preflight() { # $1=config.toml —— 任何 filesystem mutation 之前：冲突/无法解析/托管区被改/重复 key → exit 1
+  local f="$1" k d c st conflicts=0 desired="" prev="" pblockhash="" regionkeys="" outside="" key
+  local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
+  # 期望值自身校验（drift guard）：无论 config.toml 是否存在都校验 source of truth（官方 schema minimum=1）
+  local tv=""
+  tv="$(agents_span "$SOURCE_ROOT/global/config-agents.toml" \
+    | grep -E '^[[:space:]]*max_concurrent_threads_per_session[[:space:]]*=' | head -n 1 \
+    | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+  case "$tv" in ''|*[!0-9]*) log "global/config-agents.toml 期望 max_concurrent_threads_per_session 非法（必须 ≥ 1 的整数）: [$tv]"; exit 1 ;; esac
+  if [ "$tv" -lt 1 ]; then log "global/config-agents.toml 期望 max_concurrent_threads_per_session 非法（必须 ≥ 1 的整数）: [$tv]"; exit 1; fi
   [ -f "$f" ] || return 0
   grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$f" || return 0
+  prev="$(prev_line "$f")"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
+  if grep -qF "$begin" "$f"; then
+    regionkeys="$(agents_region_keys "$f" "$begin" "$end" || true)"
+    local spankeys=""
+    spankeys="$(agents_span_keys "$f" || true)"
+    # outside = span 中出现次数多于托管区内出现次数的 key（即 region 外存在同名 key）
+    for key in $spankeys; do
+      [ "$(count_in "$key" "$spankeys")" -gt "$(count_in "$key" "$regionkeys")" ] && { in_word_list "$key" "$outside" || outside="$outside$key	"; }
+    done
+    if [ -n "$pblockhash" ] && [ "$(block_body_hash "$f" "$begin" "$end")" != "$pblockhash" ]; then
+      log "Conflict: CQS managed [agents] 托管区已被手动修改（请人工处理该区域）"
+      conflicts=1
+    fi
+  fi
   desired="$(agents_desired || true)"
   while IFS=$'\t' read -r k d; do
     [ -n "$k" ] || continue
+    if [ -n "$regionkeys" ] && in_word_list "$k" "$regionkeys"; then
+      # 托管区内 key：完整性由 hash 判定；内外同名 → duplicate（TOML 非法）
+      if in_word_list "$k" "$outside"; then
+        conflicts=1
+        log "Conflict: [agents].$k 重复出现（托管区内外同名，TOML 非法）"
+      fi
+      continue
+    fi
     c="$(agents_span_value "$f" "$k" || true)"
     st="$(agents_classify "$k" "$d" "$c")"
     case "$st" in
@@ -238,40 +356,131 @@ EOF
   fi
 }
 
-merge_agents_toml() { # $1=file —— key 级 reconciliation
-  local prev="" pcreated="" pbackup=""
+merge_agents_toml() { # $1=file —— key 级 reconciliation + CQS 托管区升级（markers = ownership boundary）
+  local prev="" pcreated="" pbackup="" pblockhash=""
   prev="$(prev_line "$1")"
   [ -z "$prev" ] || pcreated="$(manifest_field "$prev" created_by_cqs)"
   [ -z "$prev" ] || pbackup="$(manifest_field "$prev" backup)"
+  [ -z "$prev" ] || pblockhash="$(manifest_field "$prev" installed_block_hash)"
   local begin="# --- codex-quota-saver managed [agents] begin ---" end="# --- codex-quota-saver managed [agents] end ---"
   # 无 [agents] 表（文件不存在或表不存在）：整块 append（CQS 拥有整个表）
   if [ ! -f "$1" ] || ! grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
     if [ "$MODE" = "--dry-run" ]; then log "dry-run append: $1"; return; fi
-    local existed=0 created=1 modified=0 ownership="cqs" backup=""
+    # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（同 install_file 的 origin/txn 分离）
+    local existed=0 created=1 modified=0 ownership="cqs" backup="" txn=""
     [ -f "$1" ] && existed=1
     if [ "$existed" = "1" ]; then
-      if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
-      created=0; modified=1; ownership="user"
+      if [ "$pcreated" = "1" ]; then
+        txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+      elif [ -n "$pbackup" ]; then
+        backup="$pbackup"; created=0; modified=1; ownership="user"
+        txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+      else
+        backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+        created=0; modified=1; ownership="user"
+      fi
     else
       track_created "$1"
     fi
-    {
-      printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
-      local desired=""
-      desired="$(agents_desired || true)"
-      while IFS=$'\t' read -r k d; do
-        [ -n "$k" ] || continue
-        printf '%s = %s\n' "$k" "$d"
-      done <<EOF
+    local blocktext="[agents]" desired=""
+    desired="$(agents_desired || true)"
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      blocktext="$blocktext
+$k = $d"
+    done <<EOF
 $desired
 EOF
-      printf '%s\n' "$end"
+    {
+      printf '\n'; printf '%s\n' "$begin"; printf '%s\n' "$blocktext"; printf '%s\n' "$end"
     } >> "$1"
-    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "backup=$backup"
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$(agents_region_hash_of "$blocktext")" "backup=$backup"
     log "append [agents]: $1"
     return
   fi
-  # 表存在：逐 key 分类（reconcile plan）
+  # markers 存在：CQS 托管区完整性（installed_block_hash）+ 升级决策
+  if grep -qF "$begin" "$1"; then
+    local regionkeys="" outside="" key k d desired="" regionhash="" newregiontext="" newregionhash="" conflicts=0 spankeys=""
+    regionkeys="$(agents_region_keys "$1" "$begin" "$end" || true)"
+    spankeys="$(agents_span_keys "$1" || true)"
+    # outside = span 中出现次数多于托管区内出现次数的 key（即 region 外存在同名 key）
+    for key in $spankeys; do
+      [ "$(count_in "$key" "$spankeys")" -gt "$(count_in "$key" "$regionkeys")" ] && { in_word_list "$key" "$outside" || outside="$outside$key	"; }
+    done
+    if [ -z "$pblockhash" ]; then
+      log "config.toml [agents] 托管区存在但 manifest 无 installed_block_hash（旧版本安装），无法安全验证，保留不覆盖: $1"
+      manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "backup=$pbackup"
+      return
+    fi
+    regionhash="$(block_body_hash "$1" "$begin" "$end")"
+    if [ "$regionhash" != "$pblockhash" ]; then
+      log "config.toml [agents] 冲突（fail-fast）："
+      log "  CQS managed [agents] 托管区已被手动修改（请人工处理该区域）"
+      exit 1
+    fi
+    desired="$(agents_desired || true)"
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      if in_word_list "$k" "$regionkeys" && in_word_list "$k" "$outside"; then
+        conflicts=1
+        log "Conflict: [agents].$k 重复出现（托管区内外同名，TOML 非法）"
+      fi
+    done <<EOF
+$desired
+EOF
+    if [ "$conflicts" = "1" ]; then
+      log "config.toml [agents] 冲突（见上方明细），安装终止（fail-fast）。"
+      exit 1
+    fi
+    # 新 desired region = desired keys 不在 region 外（user keys 永不被抢 ownership）
+    newregiontext=""
+    while IFS=$'\t' read -r k d; do
+      [ -n "$k" ] || continue
+      if in_word_list "$k" "$outside"; then continue; fi
+      if [ -n "$newregiontext" ]; then newregiontext="$newregiontext
+"; fi
+      newregiontext="$newregiontext$k = $d"
+    done <<EOF
+$desired
+EOF
+    newregionhash="$(agents_region_hash_of "$newregiontext")"
+    if [ "$newregionhash" = "$pblockhash" ]; then
+      log "[agents] reconcile: 托管区未变（未修改文件）: $1"
+      manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=0" "installed_block_hash=$pblockhash" "backup=$pbackup"
+      return
+    fi
+    # 托管区未改且 desired 变了 → 摘旧 region 写新 region（同一 txn 内；origin 身份不换）
+    if [ "$MODE" = "--dry-run" ]; then log "dry-run [agents] region upgrade: $1"; return; fi
+    local created=0 modified=1 ownership="user" txn=""
+    [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+    remove_managed_block "$1" agents-toml "$begin" "$end"
+    if grep -qE '^[[:space:]]*\[agents\][[:space:]]*(#.*)?$' "$1"; then
+      # keys-only 形状（表头在托管区外）：表头后插 markers + 新 region keys
+      awk -v b="$begin" -v e="$end" -v keys="$newregiontext" '
+        BEGIN { n = split(keys, klines, "\n") }
+        { print }
+        $0 ~ /^[[:space:]]*\[agents\][[:space:]]*(#.*)?$/ && !done {
+          print b
+          for (i = 1; i <= n; i++) { if (klines[i] != "") print klines[i] }
+          print e
+          done = 1
+        }
+      ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+    else
+      # 整文件形状（托管区含 [agents] 表头）：整块重建
+      {
+        printf '\n'; printf '%s\n' "$begin"; printf '[agents]\n'
+        printf '%s\n' "$newregiontext"
+        printf '%s\n' "$end"
+      } >> "$1"
+      newregionhash="$(agents_region_hash_of "$(printf '[agents]\n%s' "$newregiontext")")"
+    fi
+    manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$newregionhash" "backup=$pbackup"
+    log "[agents] region upgrade: $1"
+    return
+  fi
+  # markers 不存在：逐 key 分类（reconcile plan）
   local k d c st conflicts=0 addlines="" desired=""
   desired="$(agents_desired || true)"
   cqs_debug "desired=[$(printf '%s' "$desired" | tr '\n' '|')]"
@@ -311,9 +520,17 @@ EOF
     log "[agents] reconcile: 全部 adopt（未修改文件）: $1"
     return
   fi
-  # 文本补丁：表头后插 markers + 缺失 keys（绝不整文件序列化）
-  local backup=""
-  if [ -n "$pbackup" ]; then backup="$pbackup"; else backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"; fi
+  # 文本补丁：表头后插 markers + 缺失 keys（markers 不存在才走到这里；绝不整文件序列化）
+  local backup="" txn="" created=0 modified=1 ownership="user"
+  [ "$pcreated" = "1" ] && { created=1; modified=0; ownership="cqs"; }
+  if [ "$pcreated" = "1" ]; then
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+  elif [ -n "$pbackup" ]; then
+    backup="$pbackup"
+    txn="$(unique_backup_path "$1")"; cp -p "$1" "$txn"; track_txn_backup "$txn"
+  else
+    backup="$(unique_backup_path "$1")"; cp -p "$1" "$backup"; track_backup "$backup"
+  fi
   awk -v begin="$begin" -v end="$end" -v keys="$addlines" '
     BEGIN { split(keys, klines, "\n") }
     { print }
@@ -324,7 +541,7 @@ EOF
       done = 1
     }
   ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
-  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=user" "created_by_cqs=$pcreated" "modified_by_cqs=1" "backup=$backup"
+  manifest_add "append" "$1" "managed_block_id=agents-toml" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_block_hash=$(agents_region_hash_of "${addlines#?}")" "backup=$backup"
   log "reconcile [agents]: 插入缺失 keys → $1"
 }
 
@@ -361,15 +578,24 @@ install_file() { # $1=src $2=dest $3=skip_if_exists(0/1) $4=overwrite_if_changed
   fi
   if [ "$MODE" = "--dry-run" ]; then log "dry-run copy: $2"; return; fi
   mkdir -p "$(dirname "$2")"
-  local backup=""
+  # 覆盖前恰好快照一次，角色由 lifecycle provenance 决定（filesystem existence 只是 observation）：
+  #  - 用户文件首次被 CQS 覆盖（无 origin）→ 快照即 origin（进 manifest，卸载恢复用）
+  #  - 已有 origin（升级）或 dest 是 CQS 自己创建的 → 快照是 txn（仅本轮回滚用，成功后消费，绝不进 manifest）
+  local backup="" txn="" created=1 modified=0 ownership="cqs"
   if [ "$existed" = "1" ]; then
-    if [ -z "$pbackup" ]; then backup="$(unique_backup_path "$2")"; cp -p "$2" "$backup"; track_backup "$backup"; fi
+    if [ "$pcreated" = "1" ]; then
+      txn="$(unique_backup_path "$2")"; cp -p "$2" "$txn"; track_txn_backup "$txn"
+    elif [ -n "$pbackup" ]; then
+      backup="$pbackup"; created=0; modified=1; ownership="user"
+      txn="$(unique_backup_path "$2")"; cp -p "$2" "$txn"; track_txn_backup "$txn"
+    else
+      backup="$(unique_backup_path "$2")"; cp -p "$2" "$backup"; track_backup "$backup"
+      created=0; modified=1; ownership="user"
+    fi
   else
     track_created "$2"
   fi
   cp -p "$1" "$2"
-  local ownership="cqs" created=1 modified=0
-  if [ "$existed" = "1" ]; then ownership="user" created=0 modified=1; fi
   # backup 必须为最后字段（路径可含空格，uninstall 用「最后出现的 backup=」提取）
   manifest_add "copy" "$2" "ownership=$ownership" "created_by_cqs=$created" "modified_by_cqs=$modified" "installed_hash=$(sha256sum "$2" | cut -d' ' -f1)" "src=$1" "backup=$backup"
   log "copy: $2"
@@ -446,24 +672,33 @@ if [ "$MODE" = "install" ]; then
   mkdir -p "$CODEX_HOME/agents"
 fi
 
-add_managed_block "$CODEX_HOME/AGENTS.md" "global-agents" "$REPO_ROOT/global/AGENTS.md"
+add_managed_block "$CODEX_HOME/AGENTS.md" "global-agents" "$SOURCE_ROOT/global/AGENTS.md"
 maybe_fail 1
 merge_agents_toml  "$CODEX_HOME/config.toml"
 maybe_fail 2
-install_file "$REPO_ROOT/global/agents/luna-worker.toml" "$CODEX_HOME/agents/luna-worker.toml" 0 1
+install_file "$SOURCE_ROOT/global/agents/luna-worker.toml" "$CODEX_HOME/agents/luna-worker.toml" 0 1
 maybe_fail 3
 # 项目级协议：托管块合并（已存在追加、不存在创建）；协议文本 source of truth = project/AGENTS.md
-add_managed_block "$PROJECT_PATH/AGENTS.md" "project-protocol" "$REPO_ROOT/project/AGENTS.md"
+add_managed_block "$PROJECT_PATH/AGENTS.md" "project-protocol" "$SOURCE_ROOT/project/AGENTS.md"
 maybe_fail 4
-install_file "$REPO_ROOT/project/dot-codex/config.toml" "$PROJECT_PATH/.codex/config.toml" 1 0
+install_file "$SOURCE_ROOT/project/dot-codex/config.toml" "$PROJECT_PATH/.codex/config.toml" 1 0
 maybe_fail 5
-install_file "$REPO_ROOT/project/dot-codex/next-step.md" "$PROJECT_PATH/.codex/next-step.md" 1 0
+install_file "$SOURCE_ROOT/project/dot-codex/next-step.md" "$PROJECT_PATH/.codex/next-step.md" 1 0
 maybe_fail 6
-install_file "$REPO_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1
+install_file "$SOURCE_ROOT/project/dot-codex/skills/luna-routing/SKILL.md" "$PROJECT_PATH/.codex/skills/luna-routing/SKILL.md" 0 1
 maybe_fail 7
 
-# 提交点：全部步骤成功后原子替换旧 manifest（dry-run 无 journal，跳过提交）
+# 提交点：全部步骤成功后原子替换旧 manifest（dry-run 无 journal，跳过提交）。
+# mv 先于 txn 消费：若 mv 失败，EXIT trap 仍可用 txn 回滚。
 if [ "$MODE" = "install" ]; then
   mv -f "$MANIFEST_JOURNAL" "$MANIFEST"
+  if [ -n "$TXN_BACKUPS_THIS_RUN" ]; then
+    while IFS= read -r b; do
+      [ -z "$b" ] && continue
+      [ -f "$b" ] && rm -f "$b"
+    done <<EOF
+$TXN_BACKUPS_THIS_RUN
+EOF
+  fi
 fi
 log "安装完成（mode=$MODE）。"

@@ -110,6 +110,45 @@ def test_write_next_step_ignores_extra_path_argument(tmp_path):
     _run(scenario())
 
 
+def test_write_next_step_symlink_rejected_via_call_tool_is_error_and_session_survives(tmp_path):
+    """威胁 A 必须经 MCP 层返回 is_error=True 工具结果（而非协议层 JSON-RPC 错误），
+    且同一会话后续只读工具仍可用——安全拒绝不得变成 bridge 可用性故障。"""
+    async def scenario():
+        ws = tmp_path / "repo"
+        ws.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _symlink_or_skip(outside, ws / ".codex", target_is_directory=True)
+        async with _guard_session(str(ws)) as (client, guard):
+            r = await client.call_tool("write_next_step", {"content": "escape"})
+            assert r.is_error is True
+            assert "拒绝" in r.content[0].text
+            # 会话存活：后续允许的只读工具照常工作
+            ok = await client.call_tool("read_file", {"path": "a"})
+            assert ok.is_error is False
+            assert ok.content[0].text == "ok:read_file"
+        assert not (outside / "next-step.md").exists()
+    _run(scenario())
+
+
+def test_write_next_step_file_symlink_rejected_via_call_tool_is_error(tmp_path):
+    """威胁 B（next-step.md 本身是指向外部的符号链接）同样经 MCP 层返回 is_error=True。"""
+    async def scenario():
+        ws = tmp_path / "repo"
+        (ws / ".codex").mkdir(parents=True)
+        victim = tmp_path / "victim.md"
+        victim.write_text("SECRET", encoding="utf-8")
+        _symlink_or_skip(victim, ws / ".codex" / "next-step.md")
+        async with _guard_session(str(ws)) as (client, guard):
+            r = await client.call_tool("write_next_step", {"content": "overwrite"})
+            assert r.is_error is True
+            assert "拒绝" in r.content[0].text
+            ok = await client.call_tool("read_file", {"path": "a"})
+            assert ok.is_error is False
+        assert victim.read_text(encoding="utf-8") == "SECRET"
+    _run(scenario())
+
+
 def test_write_next_step_function_fixed_path(tmp_path):
     ws = tmp_path / "repo"
     n = guard_lib.write_next_step(str(ws), "# hello\nnext")

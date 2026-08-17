@@ -259,6 +259,398 @@ Describe '备份身份与生命周期合并规则（Persistent Provenance Ledger
     }
 }
 
+# ---- Cross-version upgrade（S1→S2/S3）：lifecycle provenance 不随版本升级衰减 ----
+# source 树通过 CQS_TEST_SOURCE_ROOT seam 指向 staged 副本（S1/S2/S3），
+# 不修改仓库真实 global/ + project/ 树。txn 快照（覆盖前本轮状态）成功后必须消费。
+Describe 'Cross-version upgrade（S1→S2/S3 生命周期）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        function New-SourceStage([string]$Root, [string]$Name) {
+            $s = Join-Path $Root $Name
+            Copy-Item (Join-Path $repoRoot 'global') (Join-Path $s 'global') -Recurse
+            Copy-Item (Join-Path $repoRoot 'project') (Join-Path $s 'project') -Recurse
+            return $s
+        }
+        function Copy-SourceStage([string]$Src, [string]$DstRoot, [string]$Name) {
+            $d = Join-Path $DstRoot $Name
+            Copy-Item "$Src\global" "$d\global" -Recurse
+            Copy-Item "$Src\project" "$d\project" -Recurse
+            return $d
+        }
+        function Invoke-WithSource([string]$Source, [scriptblock]$Body) {
+            $env:CQS_TEST_SOURCE_ROOT = $Source
+            try { & $Body } finally { Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'Upgrade Case A：USER → S1 → S2 → uninstall → USER（origin 身份贯穿升级）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-a"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        $ref = New-Item -ItemType File "$TestDrive/ref-user-original"
+        Set-Content $ref -Value 'USER ORIGINAL' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-a'
+        New-Item -ItemType Directory (Join-Path $codex 'agents') -Force | Out-Null
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-a')
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        Copy-Item $ref $worker -Force
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s1 'global\agents\luna-worker.toml'))
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s2 'global\agents\luna-worker.toml'))
+        # origin 仍只有一份（txn 成功已消费）；installed_hash 前进到 S2
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $worker }
+        $e.backup | Should -Not -BeNullOrEmpty
+        $e.installed_hash | Should -Be (Get-Sha256 (Join-Path $s2 'global\agents\luna-worker.toml'))
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 $ref)
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 0
+    }
+
+    It 'Upgrade Case B：missing → S1 → S2 → uninstall → missing（CQS-created 不被重分类）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-b"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-b'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-b')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s2 'global\agents\luna-worker.toml'))
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $worker }
+        $e.created_by_cqs | Should -BeTrue
+        $e.ownership | Should -Be 'cqs'
+        $e.backup | Should -BeNullOrEmpty
+        # CQS-created 升级：绝不铸造假 origin；txn 已消费 → 零 .bak
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 0
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Test-Path $worker) | Should -BeFalse
+        (Test-Path (Get-ManifestPath $codex)) | Should -BeFalse
+    }
+
+    It 'Upgrade Case C：USER → S1 → S2 → S3 → uninstall → USER（多版本不衰减）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-c"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        $s3 = Copy-SourceStage $s1 $stage.FullName 's3'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        Set-Content (Join-Path $s3 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V3' -Encoding UTF8
+        $ref = New-Item -ItemType File "$TestDrive/ref-user-original-c"
+        Set-Content $ref -Value 'USER ORIGINAL' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-c'
+        New-Item -ItemType Directory (Join-Path $codex 'agents') -Force | Out-Null
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-c')
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        Copy-Item $ref $worker -Force
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        Invoke-WithSource $s3 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s3 'global\agents\luna-worker.toml'))
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 $ref)
+    }
+
+    It 'Upgrade Case D：missing → S1 → S2 → S3 → uninstall → missing' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-d"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        $s3 = Copy-SourceStage $s1 $stage.FullName 's3'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        Set-Content (Join-Path $s3 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V3' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-d'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-d')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        Invoke-WithSource $s3 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s3 'global\agents\luna-worker.toml'))
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $worker }
+        $e.created_by_cqs | Should -BeTrue
+        $e.backup | Should -BeNullOrEmpty
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 0
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Test-Path $worker) | Should -BeFalse
+    }
+
+    It 'Upgrade Case E：USER → S1 → 升级 S2 失败 → 恢复 S1（不楔死、origin 完好）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-e"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        $ref = New-Item -ItemType File "$TestDrive/ref-user-original-e"
+        Set-Content $ref -Value 'USER ORIGINAL' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-e'
+        New-Item -ItemType Directory (Join-Path $codex 'agents') -Force | Out-Null
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-e')
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        Copy-Item $ref $worker -Force
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $manifest = Get-ManifestPath $codex
+        $before = Get-Content $manifest -Raw -Encoding UTF8
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s2
+            $env:CQS_TEST_FAIL_AFTER = '3'
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\CQS_TEST_FAIL_AFTER -ErrorAction SilentlyContinue
+        }
+        # transaction invariant：文件系统 = S1，manifest = S1，origin 备份完好
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s1 'global\agents\luna-worker.toml'))
+        (Get-Content $manifest -Raw -Encoding UTF8) | Should -Be $before
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        # 不楔死：重试升级可完成；uninstall 恢复 USER ORIGINAL
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s2 'global\agents\luna-worker.toml'))
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 $ref)
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 0
+    }
+
+    It 'Upgrade Case F：missing → S1 → 升级 S2 失败 → 恢复 S1 且 created_by_cqs 保持' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-f"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s2 'global\agents\luna-worker.toml') -Value 'LUNA WORKER V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-up-f'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-up-f')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $worker = Join-Path $codex 'agents\luna-worker.toml'
+        $manifest = Get-ManifestPath $codex
+        $before = Get-Content $manifest -Raw -Encoding UTF8
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s2
+            $env:CQS_TEST_FAIL_AFTER = '3'
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\CQS_TEST_FAIL_AFTER -ErrorAction SilentlyContinue
+        }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s1 'global\agents\luna-worker.toml'))
+        (Get-Content $manifest -Raw -Encoding UTF8) | Should -Be $before
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 0
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        (Get-Sha256 $worker) | Should -Be (Get-Sha256 (Join-Path $s2 'global\agents\luna-worker.toml'))
+        Invoke-Main -Uninstall -CodexHome $codex
+        (Test-Path $worker) | Should -BeFalse
+    }
+}
+
+# ---- Managed block 版本升级（installed_block_hash）：块体未被用户修改才可升级 ----
+Describe 'Managed block 版本升级（installed_block_hash）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        function New-SourceStage([string]$Root, [string]$Name) {
+            $s = Join-Path $Root $Name
+            Copy-Item (Join-Path $repoRoot 'global') (Join-Path $s 'global') -Recurse
+            Copy-Item (Join-Path $repoRoot 'project') (Join-Path $s 'project') -Recurse
+            return $s
+        }
+        function Copy-SourceStage([string]$Src, [string]$DstRoot, [string]$Name) {
+            $d = Join-Path $DstRoot $Name
+            Copy-Item "$Src\global" "$d\global" -Recurse
+            Copy-Item "$Src\project" "$d\project" -Recurse
+            return $d
+        }
+        function Invoke-WithSource([string]$Source, [scriptblock]$Body) {
+            $env:CQS_TEST_SOURCE_ROOT = $Source
+            try { & $Body } finally { Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue }
+        }
+    }
+
+    It 'Case G：用户内容 + CQS 块 S1 → 模板升级 S2 → 块升级、用户内容不变、卸载只剩用户内容' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-g"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s1 'global\AGENTS.md') -Value 'LUNA PROTOCOL V1' -Encoding UTF8
+        Set-Content (Join-Path $s2 'global\AGENTS.md') -Value 'LUNA PROTOCOL V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-mb-g'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $f = Join-Path $codex 'AGENTS.md'
+        Set-Content $f -Value 'USER AGENTS' -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-mb-g')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        "$(Get-Content $f -Raw -Encoding UTF8)" | Should -Match 'LUNA PROTOCOL V1'
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $raw = "$(Get-Content $f -Raw -Encoding UTF8)"
+        $raw | Should -Match 'LUNA PROTOCOL V2'
+        $raw | Should -Not -Match 'LUNA PROTOCOL V1'
+        $raw | Should -Match 'USER AGENTS'
+        ([regex]::Matches($raw, [regex]::Escape('<!-- cqs-managed-block:global-agents begin -->'))).Count | Should -Be 1
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $f }
+        $e.installed_block_hash | Should -Not -BeNullOrEmpty
+        Invoke-Main -Uninstall -CodexHome $codex
+        "$(Get-Content $f -Raw -Encoding UTF8)".Trim() | Should -Be 'USER AGENTS'
+    }
+
+    It 'Case H：用户编辑块内 → S2 尝试 → 不覆盖 + block-user-modified' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-h"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-Content (Join-Path $s1 'global\AGENTS.md') -Value 'LUNA PROTOCOL V1' -Encoding UTF8
+        Set-Content (Join-Path $s2 'global\AGENTS.md') -Value 'LUNA PROTOCOL V2' -Encoding UTF8
+        $codex = Join-Path $TestDrive 'codex-mb-h'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $f = Join-Path $codex 'AGENTS.md'
+        Set-Content $f -Value 'USER AGENTS' -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-mb-h')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        # 用户编辑块内（保留 markers）
+        $edited = "$(Get-Content $f -Raw -Encoding UTF8)".Replace('LUNA PROTOCOL V1', 'USER EDIT INSIDE BLOCK')
+        Set-Content $f -Value $edited -Encoding UTF8
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $raw = "$(Get-Content $f -Raw -Encoding UTF8)"
+        $raw | Should -Match 'USER EDIT INSIDE BLOCK'
+        $raw | Should -Not -Match 'LUNA PROTOCOL V2'
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $f }
+        $e.reason | Should -Be 'block-user-modified'
+        @(Get-ChildItem $codex -Recurse -Filter '*.bak-*').Count | Should -Be 1
+        Invoke-Main -Uninstall -CodexHome $codex
+        "$(Get-Content $f -Raw -Encoding UTF8)".Trim() | Should -Be 'USER AGENTS'
+    }
+}
+
+# ---- agents reconciliation ownership-aware：markers 内 = CQS-owned（可升级），markers 外 = user-owned ----
+Describe 'agents reconciliation ownership-aware 升级（CQS region vs user keys）' {
+    BeforeAll {
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        function New-SourceStage([string]$Root, [string]$Name) {
+            $s = Join-Path $Root $Name
+            Copy-Item (Join-Path $repoRoot 'global') (Join-Path $s 'global') -Recurse
+            Copy-Item (Join-Path $repoRoot 'project') (Join-Path $s 'project') -Recurse
+            return $s
+        }
+        function Copy-SourceStage([string]$Src, [string]$DstRoot, [string]$Name) {
+            $d = Join-Path $DstRoot $Name
+            Copy-Item "$Src\global" "$d\global" -Recurse
+            Copy-Item "$Src\project" "$d\project" -Recurse
+            return $d
+        }
+        function Invoke-WithSource([string]$Source, [scriptblock]$Body) {
+            $env:CQS_TEST_SOURCE_ROOT = $Source
+            try { & $Body } finally { Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue }
+        }
+        function Set-DesiredThreads([string]$Tree, [string]$Value) {
+            $t = Join-Path $Tree 'global\config-agents.toml'
+            (Get-Content $t -Raw -Encoding UTF8) -replace 'max_concurrent_threads_per_session = \d+', "max_concurrent_threads_per_session = $Value" | Set-Content $t -Encoding UTF8
+        }
+    }
+
+    It 'Case I：CQS-owned key threads=6 → S2 desired 4 → 升级、用户 key 不动' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-i"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-DesiredThreads $s2 '4'
+        $codex = Join-Path $TestDrive 'codex-ag-i'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nenabled = true" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-i')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        "$(Get-Content $cfg -Raw -Encoding UTF8)" | Should -Match 'max_concurrent_threads_per_session = 6'
+        Invoke-WithSource $s2 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $raw = "$(Get-Content $cfg -Raw -Encoding UTF8)"
+        $raw | Should -Match 'max_concurrent_threads_per_session = 4'
+        $raw | Should -Not -Match 'max_concurrent_threads_per_session = 6'
+        ([regex]::Matches($raw, '(?m)^\s*enabled\s*=')).Count | Should -Be 1
+        ([regex]::Matches($raw, '(?m)^\s*max_concurrent_threads_per_session\s*=')).Count | Should -Be 1
+        ([regex]::Matches($raw, [regex]::Escape('# --- codex-quota-saver managed [agents] begin ---'))).Count | Should -Be 1
+        $e = @(Read-Manifest -Path (Get-ManifestPath $codex)) | Where-Object { $_.dest -eq $cfg }
+        $e.installed_block_hash | Should -Not -BeNullOrEmpty
+        Invoke-Main -Uninstall -CodexHome $codex
+        "$(Get-Content $cfg -Raw -Encoding UTF8)".Trim() | Should -Be "[agents]`nenabled = true"
+    }
+
+    It 'Case J：user-owned threads=6 → S2 desired 4 → CONFLICT fail-fast、零 mutation' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-j"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $s2 = Copy-SourceStage $s1 $stage.FullName 's2'
+        Set-DesiredThreads $s2 '4'
+        $codex = Join-Path $TestDrive 'codex-ag-j'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nmax_concurrent_threads_per_session = 6" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-j')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $cfgBefore = Get-Content $cfg -Raw -Encoding UTF8
+        $manBefore = Get-Content (Get-ManifestPath $codex) -Raw -Encoding UTF8
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s2
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+        }
+        (Get-Content $cfg -Raw -Encoding UTF8) | Should -Be $cfgBefore
+        (Get-Content (Get-ManifestPath $codex) -Raw -Encoding UTF8) | Should -Be $manBefore
+    }
+
+    It 'duplicate key：region 内 + region 外同名 → CONFLICT fail-fast、零 mutation' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-dup"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $codex = Join-Path $TestDrive 'codex-ag-dup'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-dup')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        $cfg = Join-Path $codex 'config.toml'
+        # region 之后追加用户同名 key
+        Add-Content $cfg -Value "`nmax_concurrent_threads_per_session = 6" -Encoding UTF8
+        $cfgBefore = Get-Content $cfg -Raw -Encoding UTF8
+        { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        (Get-Content $cfg -Raw -Encoding UTF8) | Should -Be $cfgBefore
+    }
+
+    It 'threads=0（user key）：安装不能成功（conflict fail-fast、零 mutation）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-z"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $codex = Join-Path $TestDrive 'codex-ag-zero'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nmax_concurrent_threads_per_session = 0" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-zero')
+        $cfgBefore = Get-Content $cfg -Raw -Encoding UTF8
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s1
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+        }
+        (Get-Content $cfg -Raw -Encoding UTF8) | Should -Be $cfgBefore
+        (Test-Path (Get-ManifestPath $codex)) | Should -BeFalse
+    }
+
+    It 'threads=1（user key）：更严且合法 → adopt_stricter、安装成功' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-one"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        $codex = Join-Path $TestDrive 'codex-ag-one'
+        New-Item -ItemType Directory $codex -Force | Out-Null
+        $cfg = Join-Path $codex 'config.toml'
+        Set-Content $cfg -Value "[agents]`nmax_concurrent_threads_per_session = 1" -Encoding UTF8
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-one')
+        Invoke-WithSource $s1 { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex }
+        "$(Get-Content $cfg -Raw -Encoding UTF8)" | Should -Match 'max_concurrent_threads_per_session = 1'
+        "$(Get-Content $cfg -Raw -Encoding UTF8)" | Should -Not -Match 'max_concurrent_threads_per_session = 6'
+    }
+
+    It 'desired 自身非法（threads=0 的 source of truth）→ 安装拒绝启动（drift guard）' {
+        $stage = New-Item -ItemType Directory "$TestDrive/src-drift"
+        $s1 = New-SourceStage $stage.FullName 's1'
+        Set-DesiredThreads $s1 '0'
+        $codex = Join-Path $TestDrive 'codex-ag-drift'
+        $proj = New-Item -ItemType Directory (Join-Path $TestDrive 'proj-ag-drift')
+        try {
+            $env:CQS_TEST_SOURCE_ROOT = $s1
+            { Invoke-Main -ProjectPath $proj.FullName -CodexHome $codex } | Should -Throw
+        } finally {
+            Remove-Item Env:\CQS_TEST_SOURCE_ROOT -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'partial failure：中途失败不丢旧 manifest、已改资源回滚、绝不打印成功' {
     It '第 3 步注入失败：抛错、旧 manifest 字节不变、本轮改动回滚（Pester）' {
         $codex = "$TestDrive/codex-fail"
