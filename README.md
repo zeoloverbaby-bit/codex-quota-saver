@@ -64,8 +64,8 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 
 ### 第 0 步 · 前置条件
 
-- **ChatGPT 账号**：Plus 或 Pro 均可（Pro 的网页额度更充裕）；**未充值的账号也能跑**，只是网页 GPT 与 Codex 的模型选择里都没有 Sol 档，方案退化为「Luna 为主 + 人把关」
-- **Codex**：App 或 CLI 都行（App 免费额度 / CLI 订阅额度都能用这套编排）
+- **ChatGPT 账号**：**必须 Plus 或 Pro（付费订阅是硬门槛）**——自建连接器（Connectors / Developer Mode）仅对付费账号开放，免费账号连连接器都建不了；且免费档没有 Sol 模型，「Sol 管难题 + Luna 管干活」的档位分层无从谈起。Pro 网页额度更充裕，是首选
+- **Codex**：App 或 CLI 都行——执行层用 App 免费档或 CLI 订阅档均可；但**整套编排是付费订阅工作流**（网页 GPT 分析层以 ChatGPT Plus/Pro 为硬门槛，见上条）
 - **平台支持边界（部署前先看这条，详见 [COMPATIBILITY.md](COMPATIBILITY.md)）**：**Windows 推荐**（install.ps1 / bridge setup.ps1 全路径实测）；**Linux**：install.sh 已在 CI 实机验证，bridge/setup.sh 尚未真实部署；**macOS experimental**（未验证）。Windows 建议 PowerShell 5.1+，Linux/macOS 用 bash 脚本
 
 ### 第 1 步 · 安装工具包
@@ -93,7 +93,35 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 
 ### 第 3 步 · 部署 MCP 桥（可选增强，约 10 分钟）
 
-想让网页 GPT 直接读写仓库（免人工中转 next-step.md）才做这一步：
+想让网页 GPT 直接读写仓库（免人工中转 next-step.md）才做这一步。
+
+**连接方式二选一**（v1.7.0）：
+
+- **推荐：Secure MCP Tunnel（Windows 已验证）**——OpenAI 官方隧道负责身份与公网入口，本机不需要 ngrok、不需要自建 OAuth、不需要把任何端口暴露到公网。前置条件：你的 OpenAI 组织/工作区有 Tunnels 权限、已创建 Tunnel、有 Runtime API Key（principal 需 Tunnels Read + Use）、已下载官方 tunnel-client。**没有 Tunnel 权限就用下面的 ngrok fallback。**
+- **Fallback：ngrok + CQS 自建 OAuth**——原有方式，完全保留，向后兼容。
+
+#### 3a. Secure MCP Tunnel（Windows 推荐）
+
+> ⚠️ **Workspace 只读边界**：Bridge 对整个 workspace 具有广泛只读能力，`.gitignore` ≠ Bridge 不可读。**不要把 .env、私钥、SSH key、浏览器数据、客户数据、生产 secrets、高敏内部文件放进 Tunnel workspace**——推荐 dedicated working copy（详见 SECURITY.md）。
+
+1. OpenAI Platform 创建 Tunnel、下载官方 tunnel-client、创建 Runtime API Key
+2. 运行 setup：
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\bridge\setup.ps1 `
+  -Transport Tunnel `
+  -Workspace "D:\my-project" `
+  -TunnelId "tunnel_xxx" `
+  -TunnelClientPath "D:\Tools\tunnel-client.exe"
+```
+
+3. setup 如需要会安全提示输入 Runtime API Key（输入不回显；不写入命令行、不写入 guard 配置）
+4. 双击 `bridge\start-bridge-tunnel.local.bat`——launcher 自动拉起 upstream → guard → readiness 检查 → tunnel-client doctor → 隧道前台运行
+5. ChatGPT：`Settings → Connectors → 新建 → Connection = Tunnel → 选择对应 Tunnel`
+6. 冒烟：`server_info` → `read README` → `write_next_step`
+
+#### 3b. ngrok + CQS OAuth（fallback，向后兼容）
 
 ```powershell
 # Windows

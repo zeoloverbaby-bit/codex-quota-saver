@@ -1,20 +1,27 @@
 # MCP 桥（bridge-guard 版）
 
-架构：
+## Connection Layer（v1.7.0）
 
-```
-ChatGPT 连接器 → ngrok → bridge-guard（OAuth 认证 + 白名单 + write_next_step）→ coding-tools-mcp（内部引擎，仅本机）
+```text
+CQS Connection Layer
+│
+├── Secure MCP Tunnel          ← Windows verified / recommended
+│     ChatGPT → OpenAI Tunnel → tunnel-client → 127.0.0.1:8766 guard → 127.0.0.1:8765 upstream → workspace
+│
+└── ngrok + CQS OAuth          ← existing fallback（向后兼容）
+      ChatGPT 连接器 → ngrok → guard（OAuth 认证 + 白名单 + write_next_step）→ coding-tools-mcp（仅本机）
 ```
 
-> 三层架构的**分析层通道**。没有桥也能跑三层架构（网页 GPT 输出 next-step.md 全文，你人工落盘）；有桥则网页 GPT 可以直接读代码、直接写 `.codex/next-step.md`，省掉人工中转。
-> 桥依赖第三方包 [xyTom/coding-tools-mcp](https://github.com/xyTom/coding-tools-mcp)（PyPI 可装，感谢原作者）；本目录的 guard 是能力层白名单代理 + 自建 OAuth 授权服务器。
+> 核心原则：**Tunnel 管「怎么进来」，Guard 管「进来以后能干什么」。**
+> Secure MCP Tunnel 负责身份与公网 transport（不需要把 MCP server 暴露到公网）；bridge-guard 负责 capability policy（repository_read / git_read / write_next_step / filesystem boundary，deny exec/apply_patch 等）——两种连接方式共用同一个 guard，能力边界完全一致。
 
 ## 安全边界（能力层 + 身份层）
 
 - guard 只暴露**白名单只读工具**（read/search/git 读类，共 11 个）+ `write_next_step`（服务端硬编码只能写 `.codex/next-step.md`）
 - `apply_patch` / `exec_command` 及一切变更类工具在**协议层不存在**——模型连「想按」的机会都没有
-- 认证：guard **自建 OAuth 2.1 授权服务器**（授权码 + PKCE + DCR）。为什么不用 API key：ChatGPT 连接器的认证下拉只有 OAuth / 无身份验证 / 混合三种（2026-08-17 实测），发不了静态 API key 头
-- 授权流程：连接器发起 OAuth → 浏览器打开 guard 的密码页 → 输入部署时生成的 OAuth 密码 → 拿到 access token（HS256 JWT，7 天有效）
+- 认证（public/ngrok 模式）：guard **自建 OAuth 2.1 授权服务器**（授权码 + PKCE + DCR）。为什么不用 API key：ChatGPT 连接器的认证下拉只有 OAuth / 无身份验证 / 混合三种（2026-08-17 实测），发不了静态 API key 头
+- 认证（tunnel 模式）：**OpenAI Secure MCP Tunnel 负责身份**，guard 不启用自建 OAuth——本地无 OAuth MCP 强制 loopback（127.0.0.1 / ::1），配置成非 loopback 会 fail-fast（详见「部署」）
+- 授权流程（public/ngrok 模式）：连接器发起 OAuth → 浏览器打开 guard 的密码页 → 输入部署时生成的 OAuth 密码 → 拿到 access token（HS256 JWT，7 天有效）
 - **重启免疫**：客户端注册表与签名密钥落盘 `guard/state/oauth_state.json`（状态目录 ACL 收紧/0700，文件 600），重启桥不失效（旧桥「重启即全断」的坑从设计上根治）。撤销全部已发 token = **停桥 → 删除该文件 → 重启桥**（进程运行中删除无效——密钥在内存，且会以同一密钥重建文件）；`/revoke` 端点为 no-op，撤销靠 7 天 TTL 兜底（见 [SECURITY.md](../SECURITY.md)）
 - 上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` 环境变量传递（coding-tools-mcp 0.3.0 官方支持，不经命令行参数/argv）；上游不开 OAuth、不对外——认证全在 guard 层；token 仍存在于本机进程环境块（同权限/高权限本机进程可见），upstream 仅绑定 127.0.0.1
 - secrets 落 `.secrets.local.env`（POSIX chmod 600 / Windows icacls 当前用户），已 gitignore
@@ -37,6 +44,27 @@ ChatGPT 连接器 → ngrok → bridge-guard（OAuth 认证 + 白名单 + write_
 
 ## 部署
 
+**两种连接方式（v1.7.0）**：推荐 Secure MCP Tunnel（Windows 已验证）；ngrok + OAuth 为向后兼容 fallback。
+
+### Secure MCP Tunnel（Windows 推荐）
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\bridge\setup.ps1 `
+  -Transport Tunnel `
+  -Workspace "D:\path\to\repo" `
+  -TunnelId "tunnel_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" `
+  -TunnelClientPath "D:\Tools\tunnel-client.exe"
+```
+
+setup 自动：生成 `bridge/.secrets.tunnel.local.env`（Runtime API Key + upstream token，gitignored + ACL 收紧）、生成 `guard-config.tunnel.local.json`（auth_mode=tunnel，无密钥，host 固定 127.0.0.1）、调用官方 tunnel-client init 创建 profile（`cqs-<tunnel-id 末 8 位>`，MCP target 恒为 `http://127.0.0.1:8766/mcp`——**绝不直连 8765 upstream**）、生成一键 launcher `start-bridge-tunnel.local.bat`。用户不再手写 JSON、不再手工起三个进程。
+
+前置（hard）：Workspace 存在；TunnelId 官方格式 `tunnel_<32 lowercase letters or digits>`（权威校验由官方 CLI 完成，非法即 fail）；tunnel-client.exe 存在且 `--version` 可运行。Runtime API Key 优先读已有 `CONTROL_PLANE_API_KEY` 环境变量，否则 `Read-Host -AsSecureString` 交互输入（不回显）——**绝不进 argv / guard config / launcher**。
+
+日常：双击 `start-bridge-tunnel.local.bat`——upstream(8765) → guard(8766) → bounded readiness(30s) → `tunnel-client doctor`（失败即停）→ `tunnel-client run` 前台保活隧道。关闭窗口即断开隧道。
+
+### ngrok + CQS OAuth（fallback，向后兼容）
+
 ```powershell
 # Windows
 powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok静态域名> -Workspace <项目路径>
@@ -48,9 +76,9 @@ powershell -ExecutionPolicy Bypass -File .\bridge\setup.ps1 -Domain <你的ngrok
 1. ChatGPT 新建连接器：URL = `https://<域名>/mcp`，认证方式 = **OAuth**
 2. 连接器发起授权时，浏览器打开的密码页里输入 **OAuth 密码**（脚本打印 + 写在 `.secrets.local.env`）
 
-日常使用：双击 / 运行 `start-bridge.local.*`；**不开发时关闭**（隧道 = 项目后门）。
+日常使用：双击 / 运行 `start-bridge.local.*`（ngrok 模式）或 `start-bridge-tunnel.local.bat`（Tunnel 模式）；**不开发时关闭**（隧道 = 项目后门）。
 
-启动约 15 秒后会自动打开浏览器到桥密码页（预热 ngrok 拦截页）：新浏览器首次会看到英文警告页，**点一次「Visit Site」**（cookie 持久，之后不再出现）；点过之后每次启动直接见密码页，可当作「桥活着」的体检页。
+启动约 15 秒后会自动打开浏览器到桥密码页（预热 ngrok 拦截页，仅 ngrok 模式）：新浏览器首次会看到英文警告页，**点一次「Visit Site」**（cookie 持久，之后不再出现）；点过之后每次启动直接见密码页，可当作「桥活着」的体检页。
 
 前置：ngrok 已注册 authtoken 并在控制台绑定静态域名（脚本会检查并提示）；工作区路径必须真实存在。
 

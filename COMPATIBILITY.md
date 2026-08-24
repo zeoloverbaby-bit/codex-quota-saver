@@ -1,18 +1,22 @@
 # COMPATIBILITY 兼容性矩阵
 
-> Last verified: 2026-08-17。高速变化领域，本文件随每次实测更新；「今天实测成功」不自动推出「clone 后成功」，请对照本矩阵。
+> Last verified: 2026-08-24。高速变化领域，本文件随每次实测更新；「今天实测成功」不自动推出「clone 后成功」，请对照本矩阵。
 
 | 项 | 版本 / 环境 | 状态 | 备注 |
 |---|---|---|---|
 | coding-tools-mcp | 0.3.0（2026-08-13 发布） | ✅ 实测 | 脚本已 pin；上游 token 经 `CODING_TOOLS_MCP_AUTH_TOKEN` env（0.3.0 官方支持，不进 argv）；升级需重验 OAuth/bearer 参数 |
-| ngrok | 3.39.11 | ✅ 实测（Windows） | winget 安装不在 PATH，脚本已处理 |
+| ngrok | 3.39.11 | ✅ 实测（Windows） | winget 安装不在 PATH，脚本已处理；v1.7.0 起为 fallback transport（推荐 Secure MCP Tunnel） |
+| **OpenAI tunnel-client** | **0.0.12（verified_at=2026-08-24）** | ✅ **Windows real PoC** | 官方 CLI：init `--sample sample_mcp_remote_no_auth` / `--profile-dir` / `--force` / `doctor` / `run`；`api_key` 官方支持 `env:CONTROL_PLANE_API_KEY` 引用（secret 不进 argv）；TunnelId 权威格式 `tunnel_<32 lowercase letters or digits>`（非法 init 即 fail）。**其他版本：已验证版本 = 0.0.12；不 hard-fail 其他版本，CLI contract 不兼容时由官方 CLI 报错 fail** |
+| **Windows Secure MCP Tunnel** | **端到端真实 PoC** | ✅ **real end-to-end PoC** | ChatGPT → Tunnel → tunnel-client → guard → coding-tools-mcp → local disposable repo；验证：read / git / write_next_step ✅，forbidden exec absent ✅ |
+| Linux Secure MCP Tunnel | — | ⚠️ not productized / not verified | 本轮只产品化 Windows；Linux 用户继续用 ngrok + OAuth fallback |
+| macOS Secure MCP Tunnel | — | ⚠️ not productized / experimental | 同上 |
 | Windows 11 + PowerShell 5.1 | — | ✅ 实测 | install.ps1 / bridge/setup.ps1 全路径实测；.ps1 必须 UTF-8 BOM |
 | Ubuntu 24.04 / install.sh | — | ✅ CI 实机 | GitHub-hosted Ubuntu runner 真实执行：ShellCheck + pytest + bats（install.sh 幂等/冲突/回滚用例）；非独立物理机实测 |
-| Ubuntu 24.04 / bridge setup.sh | — | ⚠️ 未实机 | 仅 ShellCheck 语法验证；未完成真实 bridge deployment 实测 |
+| Ubuntu 24.04 / bridge setup.sh | — | ⚠️ 未实机 | 仅 ShellCheck 语法验证；未完成真实 bridge deployment 实测；v1.7.0 未修改（Tunnel 产品化仅 Windows） |
 | macOS | — | ⚠️ experimental | 未验证 |
 | Codex | App / CLI（2026-08 实测档） | ✅ 实测 | 见 README 已知问题（#32587 / #36294 / #35097） |
-| ChatGPT 连接器 | 认证方式只有 OAuth / 无身份验证 / 混合（2026-08-17 实测） | ✅ 实测 | 无 API key 选项 → bridge-guard 自建 OAuth 2.1（授权码 + PKCE + DCR）接入 |
-| mcp SDK（guard） | 2.0.0（pin）+ pyjwt 2.13.0（pin） | ✅ 实测 | OAuth 端到端回归测试覆盖全流程（DCR → 密码页 → PKCE → Bearer 调 MCP）+ 重启免疫 |
+| ChatGPT 连接器 | 认证方式只有 OAuth / 无身份验证 / 混合（2026-08-17 实测）；Tunnel 连接器 = Connection: Tunnel（2026-08-24 实测） | ✅ 实测 | 无 API key 选项 → bridge-guard 自建 OAuth 2.1（授权码 + PKCE + DCR）接入（public 模式）；Tunnel 模式由 OpenAI 官方隧道负责身份 |
+| mcp SDK（guard） | 2.0.0（pin）+ pyjwt 2.13.0（pin） | ✅ 实测 | OAuth 端到端回归测试覆盖全流程（DCR → 密码页 → PKCE → Bearer 调 MCP）+ 重启免疫；tunnel 模式（auth_mode=tunnel）focused tests 覆盖 fail-closed loopback + capability contract |
 
 ## 已知不兼容 / 注意
 
