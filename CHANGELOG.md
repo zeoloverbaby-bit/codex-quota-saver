@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 语义化版本。历史条目从仓库 commit 重建。
 
-## [1.7.0] - 2026-08-24（Unreleased）
+## [1.7.0] - 2026-08-24
 
 > **Public Alpha / Experimental**——versioned development release，不是 Stable milestone（A/B evidence 仍 pending）。
 
