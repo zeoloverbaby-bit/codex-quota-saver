@@ -1,6 +1,7 @@
 # 排坑表（人话版）
 
-> 全部来自 2026-08 实机部署与排障记录。坑 1-9 是 MCP 桥部署期，坑 10-14 是桥治理期，坑 15 是模型编排期，坑 16-19 是 v1.6.x 桥加固期现场，坑 20 是 live 验收期现场。
+> 全部来自 2026-08 实机部署与排障记录。坑 1-9 是 MCP 桥部署期，坑 10-14 是桥治理期，坑 15 是模型编排期，坑 16-19 是 v1.6.x 桥加固期现场，坑 20 是 live 验收期现场；坑 21+ 是 Secure MCP Tunnel 模式期（v1.7.0）。
+> 模式标注（v1.7.0 起）：`[通用]` = 两种连接方式都适用；`[ngrok]` = 仅 ngrok + OAuth 模式；`[tunnel]` = 仅 Secure MCP Tunnel 模式。**未标注的坑默认 [通用]**。
 > 通用排障原则：**先取证再动刀**——服务器侧全绿就别动服务器，问题多半在平台侧。
 
 ## 桥部署期（坑 1-9）
@@ -10,9 +11,9 @@
 
 2. **别管道喂安装脚本**：`curl | bash` 会让脚本读不到输入。下载后执行。
 
-3. **Defender 会静默隔离 ngrok.exe**：先给安装目录加 Defender 排除项再下载，否则装多少次都被删。
+3. **[ngrok] Defender 会静默隔离 ngrok.exe**：先给安装目录加 Defender 排除项再下载，否则装多少次都被删。
 
-4. **OAuth 授权的连接器，重启服务器就失效**：旧架构签名密钥每次启动随机生成 + 客户端注册表纯内存态——重启即废所有 token，表现为连接器工具全挂 / 401 / TaskGroup 报错。**（v1.6.0 已从设计上根治：bridge-guard 把密钥与 DCR 注册表落盘 `guard/state/oauth_state.json`——重启桥授权依然有效。要撤销全部已发 token = 停桥 → 删该文件 → 重启；桥运行中删文件无效，密钥在内存里）**
+4. **[ngrok] OAuth 授权的连接器，重启服务器就失效**：旧架构签名密钥每次启动随机生成 + 客户端注册表纯内存态——重启即废所有 token，表现为连接器工具全挂 / 401 / TaskGroup 报错。**（v1.6.0 已从设计上根治：bridge-guard 把密钥与 DCR 注册表落盘 `guard/state/oauth_state.json`——重启桥授权依然有效。要撤销全部已发 token = 停桥 → 删该文件 → 重启；桥运行中删文件无效，密钥在内存里）**
 
 5. **ChatGPT @ 菜单找不到连接器**：@ 列表是对话快照——旧对话永远看不到新连接器。新建对话 + 输入全名。
 
@@ -43,17 +44,27 @@
 
 ## 桥加固期（坑 16-19）
 
-16. **双击启动器约 30 秒窗口消失、只剩 ngrok**：不是最小化 ngrok 窗口的锅——旧版密码生成器越界索引混入 NUL 字节（实测 42% 概率）→ 写进 `.secrets.local.env` → cmd 的 `for /f` 读到 NUL 即静默截断 → 两个程序没拿到变量崩溃退出。v1.6.2 已修复（按字母表实际长度取模 + 拒绝采样 + 200 次生成回归测试）。
+16. **[ngrok] 双击启动器约 30 秒窗口消失、只剩 ngrok**：不是最小化 ngrok 窗口的锅——旧版密码生成器越界索引混入 NUL 字节（实测 42% 概率）→ 写进 `.secrets.local.env` → cmd 的 `for /f` 读到 NUL 即静默截断 → 两个程序没拿到变量崩溃退出。v1.6.2 已修复（按字母表实际长度取模 + 拒绝采样 + 200 次生成回归测试）。
 
 17. **双击启动器报「Windows 无法访问指定设备、路径或文件」**：ACL 收紧误授 `(R,W)` 缺执行位——资源管理器双击 .bat 要求 X 位（cmd 直读则不需要，命令行测试发现不了）。启动器要 `(RX,W)`、secrets 保持 `(R,W)`。v1.6.1 已修复（回归测试用 icacls 真实验证执行位）。
 
-18. **连接器「建立连接时发生意外错误」、工具列表为空**：授权成功 ≠ 连接成功。SDK 在 host=localhost 时自动启用 DNS-rebinding 防护、只放行回环 Host——经 ngrok 转发的公网请求全部 421 拒之门外。看 guard 访问日志定位：`/token 200 → /mcp 421` 即中招（首个 401 是 ChatGPT 无 token 探测的正常挑战，不必慌）。v1.6.3 已修复（显式放行公网域名，陌生 Host 仍被拒）。
+18. **[ngrok] 连接器「建立连接时发生意外错误」、工具列表为空**：授权成功 ≠ 连接成功。SDK 在 host=localhost 时自动启用 DNS-rebinding 防护、只放行回环 Host——经 ngrok 转发的公网请求全部 421 拒之门外。看 guard 访问日志定位：`/token 200 → /mcp 421` 即中招（首个 401 是 ChatGPT 无 token 探测的正常挑战，不必慌）。v1.6.3 已修复（显式放行公网域名，陌生 Host 仍被拒）。
 
-19. **浏览器打开桥链接先见英文警告页**：ngrok 免费版拦截页（「You are about to visit…」）**无法用技术手段跳过**（官方明确禁止注入 skip 头，实测 ERR_NGROK_7096）。新浏览器点一次「Visit Site」即可（cookie 按浏览器持久）。v1.6.4 起启动器启动 15 秒后自动打开密码页预热，把这一步提前到启动时。
+19. **[ngrok] 浏览器打开桥链接先见英文警告页**：ngrok 免费版拦截页（「You are about to visit…」）**无法用技术手段跳过**（官方明确禁止注入 skip 头，实测 ERR_NGROK_7096）。新浏览器点一次「Visit Site」即可（cookie 按浏览器持久）。v1.6.4 起启动器启动 15 秒后自动打开密码页预热，把这一步提前到启动时。
 
 ## Live 验收期（坑 20）
 
 20. **连接器被平台级禁用：`The <connector> tool has been disabled. Do not send any more messages`——重连无效，删除重建才恢复**（2026-08-18 实机，CareerOps BridgeV2 → 重建 V3 才写入成功）。归因链：桥重启杀死全部内存态 MCP 会话 → 旧对话持死会话继续调用（隧道日志见一次 401）→ 连续失败后 ChatGPT 平台把**连接器本身**标记禁用（跨对话生效）→ 后续所有对话先报 unavailable、再报 `Resource not found`、最后平台明示 disabled。判定要点：**隧道日志（ngrok 本地 API）零 openai-mcp 流量 + 平台 "disabled" 消息 = 阻断在平台侧**；此时服务器侧（OAuth / MCP / 上游 / 磁盘写）全绿就别动服务器。重连（token 成功签发、协议层 200）清不掉禁用标记——**在 ChatGPT 删除连接器并重建**（本地桥配置完全不受影响，重建后走一次 OAuth 授权即可）。
+
+## Secure MCP Tunnel 模式期（坑 21+，v1.7.0）
+
+21. **[tunnel] tunnel-client 版本兼容**：已验证 0.0.12（Windows real PoC）。其他版本不 hard-fail——setup 只校验 `--version` 可运行，CLI contract 不兼容时由官方 init 报错 fail。升级 tunnel-client 后先跑 `tunnel-client doctor --profile-dir bridge\tunnel-profile --profile cqs-xxxx`，再重跑 setup 用 `--force` 重建 profile。
+
+22. **[tunnel] health 端口冲突（默认 8081）**：tunnel-client health/UI 默认 8080，本仓库为避让改用 8081。若 8081 也被占用：`setup.ps1 -HealthPort 8082` 重新生成 profile；launcher 会打印 `tunnel NOT started`（doctor 前置检查失败），别当 setup 失败。
+
+23. **[tunnel] 插件窗口名额（网页 GPT）**：每开新窗口先 @ 主力插件占名额（应用已连接 ≠ 当前会话已启用），否则「能搜到但无法使用」。见 README 第 4 步后的日常节奏说明。
+
+24. **[tunnel] guard 拒绝非 loopback**：guard config 手改 `host` 为 0.0.0.0/LAN 会 fail-fast 退出——这是安全设计（无 OAuth MCP 绝不网络可达），别改 config，改回 127.0.0.1。
 
 ## 30 秒自救清单（桥挂了）
 
