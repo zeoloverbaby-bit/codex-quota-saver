@@ -7,6 +7,8 @@ bridge/guard/state/
 bridge/guard/.venv/
 bridge/.secrets.local.env
 .venv-guard/
+# secure mcp tunnel (v1.7.0)：profile 目录含 tunnel 配置，整体忽略；secrets 已在 bridge/*.local.* 覆盖
+bridge/tunnel-profile/
 # python
 __pycache__/
 *.pyc

@@ -2,6 +2,31 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 语义化版本。历史条目从仓库 commit 重建。
 
+## [1.7.0] - 2026-08-24
+
+> **Public Alpha / Experimental**——versioned development release，不是 Stable milestone（A/B evidence 仍 pending）。
+
+### Added
+- Windows Secure MCP Tunnel connection mode（ChatGPT → OpenAI Tunnel → tunnel-client → bridge-guard → coding-tools-mcp → workspace）
+- `bridge/setup.ps1 -Transport Tunnel -Workspace <path> -TunnelId tunnel_xxx -TunnelClientPath <path> [-HealthPort 8081] [-DryRun]`：自动生成 secrets（`.secrets.tunnel.local.env`，gitignored + ACL 收紧）、guard config（`guard-config.tunnel.local.json`，auth_mode=tunnel，无密钥）、tunnel-client profile（`cqs-<tunnel-id 末 8 位>`，MCP target 恒为 127.0.0.1:8766 guard）、一键 launcher（`start-bridge-tunnel.local.bat`：upstream → guard → bounded readiness → doctor → run foreground）
+- guard `auth_mode=tunnel`：不启用 CQS 自建 OAuth（OpenAI Tunnel 负责身份），保留完整 capability boundary（同一 make_guard 白名单 + write_next_step + 文件系统边界）；fail-closed loopback（仅 127.0.0.1 / ::1，其余 fail-fast）
+
+### Changed
+- Secure MCP Tunnel 成为有 Tunnel 权限用户的推荐连接方式（Windows verified）；ngrok + OAuth 保持 fallback，向后兼容
+- `-Transport` 未指定 + `-Domain` 提供 → 保持 legacy Ngrok 行为（旧 setup 命令不受影响）
+
+### Security
+- Tunnel mode 无 CQS 公网入站 MCP 端点（no public listener；不开放防火墙规则；不启动 ngrok）
+- loopback-only 无认证本地 guard：配置成非 loopback 即 fail-fast
+- capability boundary 不变：exec_command / apply_patch / write_stdin / kill_command / read_output / request_permissions 依旧协议层不存在
+- Runtime API Key：不进 argv / guard config / launcher；只落 gitignored ACL-restricted secrets 文件，运行时经官方 `env:CONTROL_PLANE_API_KEY` 引用进入 tunnel-client 环境
+- upstream token 继续经 `CODING_TOOLS_MCP_AUTH_TOKEN` env 传递（禁 `--auth-token` 进 argv）
+
+### Docs
+- README：连接方式二选一（Tunnel 推荐 / ngrok fallback）+ Tunnel Quick Start + Workspace Read Boundary
+- SECURITY：Tunnel Mode threat boundary + Workspace Read Boundary + Runtime API Key Boundary
+- COMPATIBILITY：tunnel-client 0.0.12 Windows real PoC（verified_at=2026-08-24）；Linux/macOS Tunnel 不标绿
+
 ## [1.6.7] - 2026-08-17
 
 ### Security
