@@ -106,19 +106,19 @@ Describe 'Secret 边界（Runtime API Key / upstream token）' {
             -SecretsFile 'C:\repo\bridge\.secrets.tunnel.local.env' -McpExe 'C:\mcp.exe' -Workspace 'D:\repo' `
             -GuardPy 'C:\py.exe' -GuardScript 'C:\guard.py' -GuardConf 'C:\conf.json' `
             -TunnelClient 'C:\tunnel-client.exe' -ProfileDir 'C:\profiles' -ProfileName 'cqs-test'
-        $secrets = New-TunnelSecretsContent -UpstreamToken '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' -RuntimeApiKey 'sk-test-runtime-key-123'
+        $secrets = New-TunnelSecretsContent -UpstreamToken 'testtok456' -RuntimeApiKey 'testkey123'
     }
     It 'Runtime API Key 从 env 读取优先，否则 Read-Host -AsSecureString' {
         $setupSource -match '\$env:CONTROL_PLANE_API_KEY' | Should -BeTrue
         $setupSource -match 'Read-Host .*-AsSecureString' | Should -BeTrue
     }
     It 'secrets 文件包含 CONTROL_PLANE_API_KEY 与 CQS_UPSTREAM_TOKEN 且纯 ASCII' {
-        $secrets -match 'CONTROL_PLANE_API_KEY=sk-test-runtime-key-123' | Should -BeTrue
-        $secrets -match 'CQS_UPSTREAM_TOKEN=0123456789abcdef' | Should -BeTrue
+        $secrets -match 'CONTROL_PLANE_API_KEY=testkey123' | Should -BeTrue
+        $secrets -match 'CQS_UPSTREAM_TOKEN=testtok456' | Should -BeTrue
         ([regex]::Matches($secrets, '[^\x00-\x7F]')).Count | Should -Be 0
     }
     It 'launcher 不含任何 secret 字面量（token/api key 不进 launcher 文本）' {
-        $bat -match 'sk-test' | Should -BeFalse
+        $bat -match 'testkey123' | Should -BeFalse
         $bat -match 'CONTROL_PLANE_API_KEY=' | Should -BeFalse
         $bat -match 'CQS_UPSTREAM_TOKEN=' | Should -BeFalse
     }

@@ -161,7 +161,7 @@ if ($Transport -eq 'Tunnel') {
     Write-Host '3. 双击 start-bridge-tunnel.local.bat（upstream → guard → doctor → tunnel 前台运行）'
     Write-Host '4. 新对话冒烟：server_info → read README → write_next_step 落盘 .codex/next-step.md'
     Write-Host '日常使用：双击 start-bridge-tunnel.local.bat；不开发时关闭（关闭窗口即断开隧道）'
-    Write-Host 'Runtime API Key 已安全落盘 ' + $TunnelEnvFile + '（gitignored + ACL 收紧），不会再次询问'
+    Write-Host -Object ('Runtime API Key 已安全落盘 ' + $TunnelEnvFile + '（gitignored + ACL 收紧），不会再次询问')
     return
 }
 
