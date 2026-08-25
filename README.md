@@ -4,7 +4,7 @@
 
 **解决一个问题：Codex 额度被最贵的模型干了最便宜的活。** 两个浪费源：**档位浪费**（规划、机械活烧着最贵的 Sol）与**过度治理**（本应在任务内自动收敛的工程问题，被错误升级成人工 Gate、全量重验——每一轮无谓的 STOP 都在烧最贵的 token 和你的注意力）。
 
-这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + 可选的 MCP 桥模板，外加实测排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
+这是一个「三层架构」（分析层 / 执行层 / 授权层）的完整部署工具包——Luna 主线程 + 有界 `luna_worker` 子代理 + 网页 GPT 规划层 + MCP 桥（**推荐连接方式：Secure MCP Tunnel（Windows 已验证）；ngrok + 自建 OAuth 为 fallback**），外加实测排坑表、一套 AI 执行治理八原则和一套可复现的 A/B 评测方案。目标读者：被 Codex 额度焦虑困扰的 ChatGPT Plus/Pro 用户，以及替他们部署这套方案的 AI。仓库无任何密钥、无个人数据，MIT 开源。
 
 ## 它解决什么（两个痛点，一份方案）
 
@@ -50,7 +50,7 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 | `project/dot-codex/skills/luna-routing/SKILL.md` | 路由决策技能 | spawn 判定决策树 + 执行包模板 + 验证门槛 |
 | `project/web-gpt-project-prompt.md` | GPT 项目指令模板 | 分析层的行为规范（粘贴给网页 GPT，不装磁盘） |
 | `install.ps1` / `install.sh` | 一键安装 | 备份不删除、只追加不覆盖，见下节 |
-| `bridge/` | MCP 桥半自动部署（可选增强） | 网页 GPT 直连仓库免人工中转；`setup.ps1/.sh` 一条命令装完，用户只需创建连接器 + 输一次密码（生成的 `.local.*` 文件含密钥、已 gitignore） |
+| `bridge/` | MCP 桥（**推荐 Secure MCP Tunnel，Windows 已验证**；ngrok + OAuth 为 fallback） | 网页 GPT 直连仓库免人工中转；`setup.ps1 -Transport Tunnel` 一条命令装完（生成 secrets / guard 配置 / tunnel-client profile / 一键 launcher），用户只需在 OpenAI Platform 建 Tunnel + 输一次 Runtime API Key（生成的 `.local.*` 文件含密钥、已 gitignore） |
 | `docs/lean-execution.md` | AI 执行治理八原则（提炼版） | 治理低效也是额度浪费：连续执行 + STOP 稀缺 + Evidence 继承 + 验证成比例 |
 | `COMPATIBILITY.md` | 兼容性矩阵 + 版本 pin | 今天能跑 → clone 后也能跑 |
 | `SECURITY.md` | 安全边界与免责声明 | 部署前必读 |
@@ -67,6 +67,9 @@ luna_worker 子代理 ×N（Luna Max）─ 有界执行包，并行干活
 - **ChatGPT 账号**：**必须 Plus 或 Pro（付费订阅是硬门槛）**——自建连接器（Connectors / Developer Mode）仅对付费账号开放，免费账号连连接器都建不了；且免费档没有 Sol 模型，「Sol 管难题 + Luna 管干活」的档位分层无从谈起。Pro 网页额度更充裕，是首选
 - **Codex**：App 或 CLI 都行——执行层用 App 免费档或 CLI 订阅档均可；但**整套编排是付费订阅工作流**（网页 GPT 分析层以 ChatGPT Plus/Pro 为硬门槛，见上条）
 - **平台支持边界（部署前先看这条，详见 [COMPATIBILITY.md](COMPATIBILITY.md)）**：**Windows 推荐**（install.ps1 / bridge setup.ps1 全路径实测）；**Linux**：install.sh 已在 CI 实机验证，bridge/setup.sh 尚未真实部署；**macOS experimental**（未验证）。Windows 建议 PowerShell 5.1+，Linux/macOS 用 bash 脚本
+- **MCP 桥连接方式（二选一，见第 3 步）**：
+  - **Secure MCP Tunnel（推荐，Windows 已验证）** 前置：OpenAI 组织/工作区有 Tunnels 权限、已创建 Tunnel、有 Runtime API Key（principal 需 Tunnels Read + Use）、已从 OpenAI Tunnels 页面下载官方 tunnel-client（`tunnel-client --version` 可运行；已验证 0.0.12）
+  - **ngrok + 自建 OAuth（fallback）** 前置：ngrok 已注册 authtoken 并绑定静态域名
 
 ### 第 1 步 · 安装工具包
 
@@ -93,19 +96,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "D:\path\to\
 
 ### 第 3 步 · 部署 MCP 桥（可选增强，约 10 分钟）
 
-想让网页 GPT 直接读写仓库（免人工中转 next-step.md）才做这一步。
-
-**连接方式二选一**（v1.7.0）：
-
-- **推荐：Secure MCP Tunnel（Windows 已验证）**——OpenAI 官方隧道负责身份与公网入口，本机不需要 ngrok、不需要自建 OAuth、不需要把任何端口暴露到公网。前置条件：你的 OpenAI 组织/工作区有 Tunnels 权限、已创建 Tunnel、有 Runtime API Key（principal 需 Tunnels Read + Use）、已下载官方 tunnel-client。**没有 Tunnel 权限就用下面的 ngrok fallback。**
-- **Fallback：ngrok + CQS 自建 OAuth**——原有方式，完全保留，向后兼容。
-
-#### 3a. Secure MCP Tunnel（Windows 推荐）
+想让网页 GPT 直接读写仓库（免人工中转 next-step.md）才做这一步。**推荐 Secure MCP Tunnel（Windows 已验证）**；没有 Tunnel 权限的用户用文末的 ngrok + OAuth fallback。
 
 > ⚠️ **Workspace 只读边界**：Bridge 对整个 workspace 具有广泛只读能力，`.gitignore` ≠ Bridge 不可读。**不要把 .env、私钥、SSH key、浏览器数据、客户数据、生产 secrets、高敏内部文件放进 Tunnel workspace**——推荐 dedicated working copy（详见 SECURITY.md）。
 
-1. OpenAI Platform 创建 Tunnel、下载官方 tunnel-client、创建 Runtime API Key
-2. 运行 setup：
+1. OpenAI Platform：创建 Tunnel、下载官方 tunnel-client、创建 Runtime API Key（前置清单见第 0 步）
+2. 运行 setup（一条命令装完：生成 secrets / guard 配置 / tunnel-client profile / 一键 launcher，**不再手写 JSON、不再手工起进程**）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass `
@@ -117,11 +113,13 @@ powershell -ExecutionPolicy Bypass `
 ```
 
 3. setup 如需要会安全提示输入 Runtime API Key（输入不回显；不写入命令行、不写入 guard 配置）
-4. 双击 `bridge\start-bridge-tunnel.local.bat`——launcher 自动拉起 upstream → guard → readiness 检查 → tunnel-client doctor → 隧道前台运行
+4. 双击 `bridge\start-bridge-tunnel.local.bat`——launcher 自动拉起 upstream(8765) → guard(8766) → readiness 检查 → `tunnel-client doctor` → 隧道前台运行
 5. ChatGPT：`Settings → Connectors → 新建 → Connection = Tunnel → 选择对应 Tunnel`
 6. 冒烟：`server_info` → `read README` → `write_next_step`
 
-#### 3b. ngrok + CQS OAuth（fallback，向后兼容）
+日常使用：双击 `start-bridge-tunnel.local.bat`；关闭窗口即断开隧道。
+
+#### Fallback：ngrok + CQS OAuth（向后兼容，无 Tunnel 权限时用）
 
 ```powershell
 # Windows

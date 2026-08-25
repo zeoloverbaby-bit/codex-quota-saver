@@ -1,8 +1,8 @@
 # Security
 
-## 历史边界（v1.5.0 及以前，如实声明）
+## 历史边界（v1.5.0 及以前，ngrok 时代，如实声明）
 
-MCP 桥的安全边界是 **prompt 约束 + OAuth 认证**，不是能力约束：上游 coding-tools-mcp 不提供工具白名单，`apply_patch`/`exec_command` 在能力层可用，仅靠分析层指令约束模型不使用。
+MCP 桥的安全边界是 **prompt 约束 + OAuth 认证**，不是能力约束：上游 coding-tools-mcp 不提供工具白名单，`apply_patch`/`exec_command` 在能力层可用，仅靠分析层指令约束模型不使用。**（v1.6.0 起已由 bridge-guard 能力层白名单取代；v1.7.0 起推荐 Secure MCP Tunnel 连接方式，本节仅作历史记录，不代表现状）**
 
 - 风险面：仓库内容本身是模型输入，存在 prompt injection 使模型偏离指令的理论可能
 - 建议：桥的 workspace 指向专用仓库，不要部署在含高敏数据或密钥的仓库上；生成密钥只落在本机 `.local.*` 文件（已 gitignore），任何密钥/域名都不应进入本仓库
